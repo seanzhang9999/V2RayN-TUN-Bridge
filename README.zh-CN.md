@@ -1,0 +1,58 @@
+# V2RayN TUN Bridge
+
+[English](README.md)
+
+一个面向 Windows 的轻量 TUN 辅助工具：直接读取现有 v2rayN 节点和路由，
+再交给独立内核建立系统级 TUN，不需要重新填写订阅或账号。
+
+它主要解决这种情况：v2rayN 普通代理可以使用，但打开 TUN 后出现全部超时、
+DNS 异常或内核流量回环。
+
+## 主要功能
+
+- 从本机 v2rayN 数据库读取所选节点、账号信息和当前路由规则。
+- 支持 Hysteria2，以及 TCP/raw、gRPC、WebSocket 传输的 VLESS。
+- 提供完整 IPv4 TUN，并同时监听 `127.0.0.1:1081` mixed 代理。
+- 显示哪些应用正在使用 TUN、实时上下行、目标地址及代理/直连出口。
+- Wi-Fi 或物理出口变化后自动重建配置。
+- Google、ChatGPT、Baidu 检测仅作提示，不决定 TUN 是否启动成功。
+- 提供免安装 Python 的 Windows 便携版。
+
+## 下载使用
+
+1. 打开[最新发行版](https://github.com/seanzhang9999/V2RayN-TUN-Bridge/releases/latest)。
+2. 下载 `V2RayN-TUN-Bridge-windows-x64.zip`，并用 `SHA256SUMS.txt` 校验。
+3. 完整解压后运行 `V2RayN-TUN-Bridge.exe`。
+4. 选择包含 `v2rayN.exe` 的目录和一个支持的节点，点击“启动 TUN”。
+5. Windows 会请求管理员权限，用于创建虚拟网卡及路由。
+6. 停止 TUN 后，如需普通代理，请自行启动 v2rayN；本程序不会代为启动。
+
+首个版本尚未进行商业代码签名，Windows 可能显示发布者未知。请先核对
+SHA-256，再决定是否运行。
+
+## 应用与连接监控
+
+- “应用”列表按进程聚合活动连接，显示入口、出口、连接数和实时速度。
+- “最近连接”显示最近五个目标和累计流量，包括刚刚结束的连接。
+- 数据只保留在内存中，关闭程序后消失，不会上传或写入历史文件。
+
+Windows 对系统服务、内核流量、部分 UDP 和极短连接可能无法识别进程，此时
+界面会如实显示“未知”，不会猜测应用名称。
+
+## 当前限制
+
+- 首发版本面向 Windows 11 x64。
+- 需要已有的 v2rayN 安装和可用配置。
+- 当前仅处理 IPv4 TUN。
+- 暂不支持 XHTTP。
+- 修改系统路由需要管理员权限。
+
+## 安全说明
+
+节点凭据仅在本机受限运行目录中临时使用；监控 API 仅监听回环地址，并使用
+每次启动随机生成的密码。清理进程时会核对路径、PID、启动时间、网卡和端口，
+不会按进程名批量结束程序。详细说明见 [SECURITY.md](SECURITY.md)。
+
+本项目与 v2rayN、MetaCubeX、Clash Verge Rev 均无隶属或背书关系。项目源码
+使用 MIT 许可证，随发行包提供的第三方组件保留各自许可证。请参阅
+[第三方声明](THIRD_PARTY_NOTICES.md)。

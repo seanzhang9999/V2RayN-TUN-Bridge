@@ -1,0 +1,42 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install build tools
+        run: python -m pip install -r requirements-build.txt
+      - name: Fetch verified runtime
+        shell: pwsh
+        run: ./packaging/fetch-runtime.ps1
+      - name: Test
+        shell: pwsh
+        run: |
+          $env:PYTHONPATH = Join-Path $PWD 'src'
+          python -m unittest discover -s tests -v
+      - name: Build portable app
+        run: pyinstaller --noconfirm V2RayN-TUN-Bridge.spec
+      - name: Package
+        shell: pwsh
+        run: |
+          Compress-Archive -Path 'dist/V2RayN-TUN-Bridge/*' -DestinationPath 'V2RayN-TUN-Bridge-windows-x64.zip'
+          (Get-FileHash -Algorithm SHA256 'V2RayN-TUN-Bridge-windows-x64.zip').Hash.ToLowerInvariant() + '  V2RayN-TUN-Bridge-windows-x64.zip' | Set-Content 'SHA256SUMS.txt'
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          generate_release_notes: true
+          files: |
+            V2RayN-TUN-Bridge-windows-x64.zip
+            SHA256SUMS.txt
