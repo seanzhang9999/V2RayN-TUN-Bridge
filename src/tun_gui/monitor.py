@@ -12,6 +12,7 @@ from typing import Any
 
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 DIRECT_CHAIN = "DIRECT-BOUND"
+RECENT_PER_SOURCE = 10
 
 
 def fetch_connections(access_path: Path, *, timeout: float = 3.0) -> dict[str, Any]:
@@ -128,6 +129,9 @@ class ConnectionAccumulator:
         recent = sorted(
             self._recent.values(), key=lambda item: float(item["sequence"]), reverse=True
         )[:5]
+        all_recent = sorted(
+            self._recent.values(), key=lambda item: float(item["sequence"]), reverse=True
+        )
         application_rows = [
             {
                 "process": item["process"],
@@ -149,6 +153,19 @@ class ConnectionAccumulator:
             "rates": totals,
             "applications": application_rows,
             "connections": [dict(item) for item in recent],
+            "tun_connections": [
+                dict(item)
+                for item in all_recent
+                if item["source"] == "tun"
+            ][:RECENT_PER_SOURCE],
+            "proxy_connections": [
+                dict(item)
+                for item in all_recent
+                if item["source"] == "mixed"
+            ][:RECENT_PER_SOURCE],
+            "unknown_source_count": sum(
+                1 for item in all_recent if item["source"] == "unknown"
+            ),
         }
 
 

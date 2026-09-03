@@ -16,8 +16,8 @@ the actual TUN path.
   the local v2rayN database.
 - Supports Hysteria2 and VLESS over TCP/raw, gRPC, or WebSocket.
 - Full IPv4 TUN plus a local mixed SOCKS/HTTP endpoint on `127.0.0.1:1081`.
-- Shows which applications currently use TUN, their live traffic, destinations,
-  and whether each connection is proxied or direct.
+- Separates recent TUN and local mixed-proxy connections into two ten-entry
+  views, with destinations, traffic, and direct/proxy routing.
 - Detects physical-interface changes and safely rebuilds the route.
 - Website checks for Google, ChatGPT, and Baidu are diagnostics only.
 - Portable Windows build: no Python installation required.
@@ -36,14 +36,17 @@ the actual TUN path.
 The first release is unsigned, so Windows may identify the publisher as
 unknown. Verify the SHA-256 checksum before running it.
 
-## Application and connection visibility
+## Connection visibility
 
 The monitor has two views:
 
-- **Applications** groups active connections by process and shows TUN/local
-  proxy origin, direct/proxy route, connection count, and live upload/download.
-- **Recent connections** shows the last five targets and cumulative traffic,
-  including recently closed connections.
+- **Recent TUN connections** shows the last ten connections captured through
+  the virtual adapter.
+- **Recent 1081 proxy connections** shows the last ten connections accepted by
+  the local SOCKS/HTTP mixed endpoint.
+
+Both views retain the existing time, target, input, route, process, and traffic
+columns, including recently closed connections.
 
 The app asks the core for strict process detection. Windows can still label
 some service, kernel, UDP, or very short-lived traffic as unknown. Monitoring

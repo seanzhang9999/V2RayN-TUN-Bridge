@@ -89,6 +89,50 @@ class ConnectionAccumulatorTests(unittest.TestCase):
         self.assertEqual(result["connections"][0]["target"], "site-5.example:443")
         self.assertTrue(all(not item["active"] for item in result["connections"]))
 
+    def test_keeps_ten_recent_connections_for_each_input_source(self):
+        monitor = ConnectionAccumulator()
+        for index in range(12):
+            monitor.update(
+                {
+                    "connections": [
+                        connection(
+                            f"tun-{index}",
+                            host=f"tun-{index}.example",
+                            chain="proxy-node",
+                            upload=index,
+                            download=index,
+                            inbound_type="TUN",
+                        ),
+                        connection(
+                            f"mixed-{index}",
+                            host=f"mixed-{index}.example",
+                            chain="proxy-node",
+                            upload=index,
+                            download=index,
+                            inbound_type="Mixed",
+                        ),
+                    ]
+                },
+                sampled_at=float(index + 1),
+            )
+
+        result = monitor.update({"connections": []}, sampled_at=20.0)
+
+        self.assertEqual(len(result["tun_connections"]), 10)
+        self.assertEqual(len(result["proxy_connections"]), 10)
+        self.assertEqual(
+            result["tun_connections"][0]["target"], "tun-11.example:443"
+        )
+        self.assertEqual(
+            result["proxy_connections"][0]["target"], "mixed-11.example:443"
+        )
+        self.assertTrue(
+            all(item["source"] == "tun" for item in result["tun_connections"])
+        )
+        self.assertTrue(
+            all(item["source"] == "mixed" for item in result["proxy_connections"])
+        )
+
     def test_human_readable_units(self):
         self.assertEqual(format_rate(2048), "2.0 KB/s")
         self.assertEqual(format_transfer(1024, 2 * 1024 * 1024), "↑ 1.0 KB  ↓ 2.0 MB")

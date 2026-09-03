@@ -267,44 +267,23 @@ class TunGuiApp:
 
         detail_tabs = ttk.Notebook(frame)
         detail_tabs.pack(fill="both", expand=True, pady=(6, 0))
-        applications_tab = ttk.Frame(detail_tabs, padding=(0, 6, 0, 0))
-        connections_tab = ttk.Frame(detail_tabs, padding=(0, 6, 0, 0))
-        detail_tabs.add(applications_tab, text="应用流量")
-        detail_tabs.add(connections_tab, text="最近连接（5 条）")
+        tun_tab = ttk.Frame(detail_tabs, padding=(0, 6, 0, 0))
+        proxy_tab = ttk.Frame(detail_tabs, padding=(0, 6, 0, 0))
+        detail_tabs.add(tun_tab, text="最近 TUN 连接（10 条）")
+        detail_tabs.add(proxy_tab, text="最近 1081 代理连接（10 条）")
 
-        app_columns = ("process", "source", "route", "connections", "speed")
-        self.applications_table = ttk.Treeview(
-            applications_tab,
-            columns=app_columns,
-            show="headings",
-            height=6,
-            selectmode="browse",
-        )
-        app_headings = {
-            "process": "应用",
-            "source": "入口",
-            "route": "出口",
-            "connections": "连接数",
-            "speed": "当前速度",
-        }
-        app_widths = {
-            "process": 220,
-            "source": 90,
-            "route": 90,
-            "connections": 70,
-            "speed": 260,
-        }
-        for key in app_columns:
-            self.applications_table.heading(key, text=app_headings[key])
-            self.applications_table.column(key, width=app_widths[key], anchor="w")
-        self.applications_table.pack(fill="both", expand=True)
+        self.tun_connections_table = self._build_connection_table(tun_tab)
+        self.proxy_connections_table = self._build_connection_table(proxy_tab)
+
+    def _build_connection_table(self, parent: ttk.Frame) -> ttk.Treeview:
+        """Create one connection view so both source tabs keep identical columns."""
 
         columns = ("time", "target", "source", "route", "process", "traffic")
-        self.connections_table = ttk.Treeview(
-            connections_tab,
+        table = ttk.Treeview(
+            parent,
             columns=columns,
             show="headings",
-            height=6,
+            height=10,
             selectmode="browse",
         )
         headings = {
@@ -324,9 +303,10 @@ class TunGuiApp:
             "traffic": 185,
         }
         for key in columns:
-            self.connections_table.heading(key, text=headings[key])
-            self.connections_table.column(key, width=widths[key], anchor="w")
-        self.connections_table.pack(fill="both", expand=True)
+            table.heading(key, text=headings[key])
+            table.column(key, width=widths[key], anchor="w")
+        table.pack(fill="both", expand=True)
+        return table
 
     def _build_log_section(self, parent: ttk.Frame) -> None:
         frame = ttk.LabelFrame(parent, text="最近日志", padding=12)
@@ -495,40 +475,42 @@ class TunGuiApp:
         self.direct_speed_var.set(
             f"↑ {format_rate(float(direct.get('up', 0)))}    ↓ {format_rate(float(direct.get('down', 0)))}"
         )
-        self.monitor_status_var.set("实时更新")
-        for item_id in self.applications_table.get_children():
-            self.applications_table.delete(item_id)
-        for item in snapshot.get("applications", [])[:10]:
-            route = {"direct": "直连", "proxy": "代理", "mixed": "混合"}.get(
-                str(item.get("route")), "未知"
-            )
-            source = {"tun": "TUN", "mixed": "本地代理", "unknown": "未知"}.get(
-                str(item.get("source")), "混合"
-            )
-            self.applications_table.insert(
-                "",
-                "end",
-                values=(
-                    item.get("process", "系统/未知"),
-                    source,
-                    route,
-                    item.get("connections", 0),
-                    f"↑ {format_rate(float(item.get('up', 0)))}    ↓ {format_rate(float(item.get('down', 0)))}",
-                ),
-            )
-        for item_id in self.connections_table.get_children():
-            self.connections_table.delete(item_id)
-        for item in snapshot.get("connections", [])[:5]:
+        unknown_count = int(snapshot.get("unknown_source_count", 0))
+        monitor_text = "实时更新"
+        if unknown_count:
+            monitor_text += f" · 未识别入口 {unknown_count} 条"
+        self.monitor_status_var.set(monitor_text)
+        self._render_connection_table(
+            self.tun_connections_table, snapshot.get("tun_connections", [])
+        )
+        self._render_connection_table(
+            self.proxy_connections_table, snapshot.get("proxy_connections", [])
+        )
+
+    @staticmethod
+    def _render_connection_table(table: ttk.Treeview, items: Any) -> None:
+        for item_id in table.get_children():
+            table.delete(item_id)
+        if not isinstance(items, list):
+            return
+        for item in items[:10]:
+            if not isinstance(item, dict):
+                continue
             route = "直连" if item.get("route") == "direct" else "代理"
             if not item.get("active", True):
                 route += "·已结束"
-            self.connections_table.insert(
+            source = {
+                "tun": "TUN",
+                "mixed": "本地代理",
+                "unknown": "未知",
+            }.get(str(item.get("source")), "未知")
+            table.insert(
                 "",
                 "end",
                 values=(
                     item.get("started", "—"),
                     item.get("target", "—"),
-                    "TUN" if item.get("source") == "tun" else "本地代理",
+                    source,
                     route,
                     item.get("process", "—"),
                     format_transfer(int(item.get("upload", 0)), int(item.get("download", 0))),
