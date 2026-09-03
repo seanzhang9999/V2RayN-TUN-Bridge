@@ -29,6 +29,7 @@ FILENAMES = {
 }
 DEFAULT_CORE_SOURCE = resource_path("runtime", "mihomo.exe")
 DEFAULT_GEO_SOURCE = resource_path("runtime")
+CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 def prepare_mihomo_configs(
@@ -115,6 +116,7 @@ def _validate(core: Path, data_dir: Path, config: Path) -> None:
         text=True,
         timeout=30,
         check=False,
+        creationflags=CREATE_NO_WINDOW,
     )
     if completed.returncode != 0:
         raise MihomoBuildError("Mihomo rejected a generated configuration")
@@ -122,7 +124,12 @@ def _validate(core: Path, data_dir: Path, config: Path) -> None:
 
 def _version(core: Path) -> str:
     completed = subprocess.run(
-        [str(core), "-v"], capture_output=True, text=True, timeout=10, check=False
+        [str(core), "-v"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+        creationflags=CREATE_NO_WINDOW,
     )
     return completed.stdout.splitlines()[0].strip() if completed.stdout else "unknown"
 

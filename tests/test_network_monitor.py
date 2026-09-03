@@ -1,6 +1,8 @@
 import sys
+import subprocess
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -11,6 +13,7 @@ from tun_controller.network_monitor import (
     NetworkMonitor,
     NetworkSignature,
     detect_network_signature,
+    read_windows_physical_default_route,
 )
 
 
@@ -159,6 +162,18 @@ class NetworkMonitorTests(unittest.TestCase):
 
         self.assertIsNone(signature)
         self.assertEqual(called, [])
+
+    def test_repeated_route_probe_never_opens_a_console_window(self):
+        completed = mock.Mock(returncode=0, stdout="")
+        with mock.patch(
+            "tun_controller.network_monitor.subprocess.run", return_value=completed
+        ) as run:
+            self.assertIsNone(read_windows_physical_default_route())
+
+        self.assertEqual(
+            run.call_args.kwargs["creationflags"],
+            getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
 
 
 if __name__ == "__main__":

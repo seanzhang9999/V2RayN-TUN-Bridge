@@ -16,6 +16,9 @@ from typing import Any
 from tun_controller.dns_resolver import resolve_server_ipv4
 
 
+CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
 class NetworkDetectionError(RuntimeError):
     """A credential-free physical network detection error."""
 
@@ -242,6 +245,7 @@ $rows | Sort-Object routeMetric,interfaceIndex | Select-Object -First 1 | Conver
         timeout=12,
         check=False,
         env=environment,
+        creationflags=CREATE_NO_WINDOW,
     )
     if completed.returncode != 0:
         raise NetworkDetectionError("无法读取物理默认路由")

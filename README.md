@@ -54,7 +54,7 @@ data remains in memory and is not written to disk.
 - Windows 11 x64; Windows 10 may work but is not yet a release target.
 - An existing v2rayN installation with a working profile and routing policy.
 - Administrator rights for TUN and route changes.
-- IPv4 TUN only in v0.1.0.
+- IPv4 TUN only in the current v0.1.x releases.
 - XHTTP is not yet supported.
 - The app currently understands the v2rayN 7.x storage layout used by the test
   machine; please report redacted compatibility failures.
