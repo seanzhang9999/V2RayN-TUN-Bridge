@@ -9,7 +9,13 @@ from unittest import mock
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from tun_controller.mihomo_supervisor import MihomoSupervisor, SourceSnapshot
+from tun_controller.mihomo_supervisor import (
+    MihomoSupervisor,
+    SourceSnapshot,
+    classify_core_exit,
+    describe_core_exit,
+    normalize_windows_exit_code,
+)
 from tun_controller.network_monitor import NetworkSignature
 
 
@@ -62,6 +68,10 @@ class MihomoDailyControllerTests(unittest.TestCase):
         self.assertIn("ManualV2rayN", text)
         self.assertIn("Test-SupervisorRunning", text)
         self.assertNotIn("Stop-Process -Name", text)
+        self.assertIn(
+            "-Verb RunAs -ArgumentList $arguments -WindowStyle Hidden -PassThru",
+            text,
+        )
 
     def test_supervisor_arms_watchdog_and_runs_informational_checks_after_start(self):
         text = (PROJECT_ROOT / "src/tun_controller/mihomo_supervisor.py").read_text(
@@ -101,6 +111,41 @@ class MihomoDailyControllerTests(unittest.TestCase):
                 all(item["state"] == "failed" for item in supervisor.health_checks.values())
             )
             self.assertTrue(all(state == "running" for state, _ in written))
+
+    def test_core_exit_classification_uses_watchdog_evidence(self):
+        self.assertEqual(
+            classify_core_exit(-1, {"heartbeatExpired": True, "forcedStop": True}),
+            "watchdog-heartbeat-timeout",
+        )
+        self.assertEqual(
+            classify_core_exit(0, {"cancelled": False, "forcedStop": False}),
+            "core-clean-exit",
+        )
+        self.assertEqual(classify_core_exit(2, None), "core-error-exit")
+
+    def test_windows_unsigned_exit_code_is_normalized(self):
+        self.assertEqual(normalize_windows_exit_code(4294967295), -1)
+        self.assertEqual(normalize_windows_exit_code(2), 2)
+        self.assertEqual(normalize_windows_exit_code(-1), -1)
+
+    def test_watchdog_timeout_has_actionable_message(self):
+        message = describe_core_exit(-1, "watchdog-heartbeat-timeout")
+        self.assertIn("心跳持续中断", message)
+        self.assertIn("睡眠或唤醒", message)
+
+    def test_watchdog_requires_continuous_stale_confirmation(self):
+        text = (PROJECT_ROOT / "tun-watchdog.ps1").read_text(encoding="utf-8-sig")
+        self.assertIn("HeartbeatConfirmSeconds", text)
+        self.assertIn("$staleObservedAt", text)
+        self.assertIn("$heartbeatFresh", text)
+        self.assertIn("staleConfirmationSeconds", text)
+
+    def test_supervisor_uses_independent_heartbeat_worker(self):
+        text = (PROJECT_ROOT / "src/tun_controller/mihomo_supervisor.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("_start_heartbeat_worker", text)
+        self.assertIn("_stop_heartbeat_worker", text)
 
 if __name__ == "__main__":
     unittest.main()

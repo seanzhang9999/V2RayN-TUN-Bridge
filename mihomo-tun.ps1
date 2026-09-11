@@ -43,7 +43,7 @@ if ($Action -ne 'Status' -and -not (Test-IsAdministrator)) {
     if ($AppRoot) { $arguments += @('-AppRoot', ('"{0}"' -f $AppRoot)) }
     if ($AppExecutable) { $arguments += @('-AppExecutable', ('"{0}"' -f $AppExecutable)) }
     try {
-        $process = Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList $arguments -PassThru
+        $process = Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList $arguments -WindowStyle Hidden -PassThru
     } catch {
         exit 5
     }

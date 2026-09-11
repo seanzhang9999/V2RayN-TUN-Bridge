@@ -6,10 +6,21 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from tun_gui.app import CONTROL_SCRIPT, build_control_command
+from tun_gui.app import (
+    APP_TITLE,
+    CONTROL_SCRIPT,
+    StatusFileWatcher,
+    build_control_command,
+    status_is_live,
+)
+from tun_bridge import __version__
 
 
 class TunGuiCommandTests(unittest.TestCase):
+    def test_version_is_visible_in_application_title(self):
+        self.assertEqual(__version__, "0.1.4")
+        self.assertIn("v0.1.4", APP_TITLE)
+
     def test_start_uses_the_shared_powershell_control_script(self):
         app_root = Path(r"C:\fixture\v2rayN")
 
@@ -41,6 +52,56 @@ class TunGuiCommandTests(unittest.TestCase):
 
         self.assertNotIn("-ProfileId", command)
         self.assertNotIn("-ManualV2rayN", command)
+
+    def test_status_watcher_emits_only_when_file_changes(self):
+        import json
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            status_path = Path(directory) / "status.json"
+            status_path.write_text(json.dumps({"state": "failed"}), encoding="utf-8")
+            watcher = StatusFileWatcher(status_path)
+
+            changed, value = watcher.poll()
+            self.assertTrue(changed)
+            self.assertEqual(value, {"state": "failed"})
+
+            changed, value = watcher.poll()
+            self.assertFalse(changed)
+            self.assertEqual(value, {"state": "failed"})
+
+            status_path.write_text(
+                json.dumps({"state": "running", "checkpoint": "monitoring"}),
+                encoding="utf-8",
+            )
+            changed, value = watcher.poll()
+            self.assertTrue(changed)
+            self.assertEqual(value["state"], "running")
+
+    def test_status_watcher_reports_file_removal_once(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            status_path = Path(directory) / "status.json"
+            status_path.write_text('{"state":"running"}', encoding="utf-8")
+            watcher = StatusFileWatcher(status_path)
+            watcher.poll()
+            status_path.unlink()
+
+            changed, value = watcher.poll()
+            self.assertTrue(changed)
+            self.assertIsNone(value)
+            changed, value = watcher.poll()
+            self.assertFalse(changed)
+            self.assertIsNone(value)
+
+    def test_active_status_requires_a_live_supervisor_but_failure_is_historical(self):
+        running = {"state": "running", "supervisorPid": 123}
+        failed = {"state": "failed", "supervisorPid": 123}
+
+        self.assertFalse(status_is_live(running, process_exists=lambda _pid: False))
+        self.assertTrue(status_is_live(running, process_exists=lambda _pid: True))
+        self.assertTrue(status_is_live(failed, process_exists=lambda _pid: False))
 
 
 if __name__ == "__main__":

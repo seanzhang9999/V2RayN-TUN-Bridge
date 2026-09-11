@@ -17,7 +17,7 @@ the actual TUN path.
 - Supports Hysteria2 and VLESS over TCP/raw, gRPC, or WebSocket.
 - Full IPv4 TUN plus a local mixed SOCKS/HTTP endpoint on `127.0.0.1:1081`.
 - Separates recent TUN and local mixed-proxy connections into two ten-entry
-  views, with destinations, traffic, and direct/proxy routing.
+  views, with destinations, instantaneous speeds, and direct/proxy routing.
 - Detects physical-interface changes and safely rebuilds the route.
 - Website checks for Google, ChatGPT, and Baidu are diagnostics only.
 - Portable Windows build: no Python installation required.
@@ -45,8 +45,10 @@ The monitor has two views:
 - **Recent 1081 proxy connections** shows the last ten connections accepted by
   the local SOCKS/HTTP mixed endpoint.
 
-Both views retain the existing time, target, input, route, process, and traffic
-columns, including recently closed connections.
+Both views retain the existing time, target, input, route, process, and live
+upload/download speed columns, including recently closed connections. A closed
+connection remains visible with a zero rate instead of a misleading cumulative
+byte count.
 
 The app asks the core for strict process detection. Windows can still label
 some service, kernel, UDP, or very short-lived traffic as unknown. Monitoring

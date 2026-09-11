@@ -12,6 +12,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 from tun_gui.monitor import (
     ConnectionAccumulator,
     fetch_connections,
+    format_connection_rate,
     format_rate,
     format_transfer,
 )
@@ -135,7 +136,52 @@ class ConnectionAccumulatorTests(unittest.TestCase):
 
     def test_human_readable_units(self):
         self.assertEqual(format_rate(2048), "2.0 KB/s")
+        self.assertEqual(
+            format_connection_rate(1024, 2 * 1024 * 1024),
+            "↑ 1.0 KB/s  ↓ 2.0 MB/s",
+        )
         self.assertEqual(format_transfer(1024, 2 * 1024 * 1024), "↑ 1.0 KB  ↓ 2.0 MB")
+
+    def test_connection_rows_use_sampled_rates_not_cumulative_totals(self):
+        monitor = ConnectionAccumulator()
+        first = monitor.update(
+            {
+                "connections": [
+                    connection(
+                        "live",
+                        host="example.com",
+                        chain="proxy-node",
+                        upload=50_000,
+                        download=80_000,
+                    )
+                ]
+            },
+            sampled_at=10.0,
+        )
+        self.assertEqual(first["tun_connections"][0]["up_rate"], 0.0)
+        self.assertEqual(first["tun_connections"][0]["down_rate"], 0.0)
+
+        second = monitor.update(
+            {
+                "connections": [
+                    connection(
+                        "live",
+                        host="example.com",
+                        chain="proxy-node",
+                        upload=52_000,
+                        download=86_000,
+                    )
+                ]
+            },
+            sampled_at=12.0,
+        )
+        self.assertEqual(second["tun_connections"][0]["up_rate"], 1000.0)
+        self.assertEqual(second["tun_connections"][0]["down_rate"], 3000.0)
+
+        closed = monitor.update({"connections": []}, sampled_at=14.0)
+        self.assertFalse(closed["tun_connections"][0]["active"])
+        self.assertEqual(closed["tun_connections"][0]["up_rate"], 0.0)
+        self.assertEqual(closed["tun_connections"][0]["down_rate"], 0.0)
 
     def test_groups_active_connections_by_application_and_identifies_tun(self):
         monitor = ConnectionAccumulator()

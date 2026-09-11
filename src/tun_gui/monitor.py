@@ -85,13 +85,12 @@ class ConnectionAccumulator:
             if elapsed and previous is not None:
                 up_rate = max(upload - previous[0], 0) / elapsed
                 down_rate = max(download - previous[1], 0) / elapsed
-            elif elapsed:
-                up_rate = upload / elapsed
-                down_rate = download / elapsed
             totals[route]["up"] += up_rate
             totals[route]["down"] += down_rate
 
             item = _connection_view(raw, route=route)
+            item["up_rate"] = up_rate
+            item["down_rate"] = down_rate
             app_key = str(item["process"]).casefold()
             application = applications.setdefault(
                 app_key,
@@ -121,6 +120,8 @@ class ConnectionAccumulator:
         for connection_id, item in self._recent.items():
             if connection_id not in active_ids:
                 item["active"] = False
+                item["up_rate"] = 0.0
+                item["down_rate"] = 0.0
 
         while len(self._recent) > self.history_limit:
             self._recent.popitem(last=False)
@@ -236,6 +237,10 @@ def _non_negative_int(value: Any) -> int:
 
 def format_rate(value: float) -> str:
     return f"{_format_size(value)}/s"
+
+
+def format_connection_rate(upload: float, download: float) -> str:
+    return f"↑ {format_rate(upload)}  ↓ {format_rate(download)}"
 
 
 def format_transfer(upload: int, download: int) -> str:

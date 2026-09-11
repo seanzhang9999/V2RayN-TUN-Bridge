@@ -9,6 +9,7 @@ import json
 import os
 import secrets
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,10 +25,47 @@ CREATE_NO_WINDOW = 0x08000000
 WINDOWS_EPOCH_TICKS = 504_911_232_000_000_000
 TUN_NAME = "mihomo_tun_controller"
 CONTROLLER_PORT = 19092
+WATCHDOG_REPORT_NAME = "mihomo-runtime-watchdog-report.json"
 
 
 class SupervisorError(RuntimeError):
     """A redaction-safe runtime error."""
+
+
+def normalize_windows_exit_code(return_code: int) -> int:
+    """Render unsigned Win32 process status values as their signed equivalent."""
+    if return_code >= 1 << 31:
+        return return_code - (1 << 32)
+    return return_code
+
+
+def classify_core_exit(
+    return_code: int, watchdog_report: dict[str, Any] | None
+) -> str:
+    """Turn a process exit and watchdog evidence into a stable reason."""
+    if watchdog_report:
+        if watchdog_report.get("heartbeatExpired") and watchdog_report.get("forcedStop"):
+            return "watchdog-heartbeat-timeout"
+        if watchdog_report.get("forcedStop"):
+            return "watchdog-forced-stop"
+    if return_code == 0:
+        return "core-clean-exit"
+    return "core-error-exit"
+
+
+def describe_core_exit(return_code: int, reason: str) -> str:
+    """Return a concise, user-facing explanation for a core termination."""
+    if reason == "watchdog-heartbeat-timeout":
+        return (
+            "看门狗检测到控制程序心跳持续中断，已安全停止 Mihomo 核心"
+            "（可能发生于系统睡眠或唤醒后恢复较慢；退出代码 "
+            f"{return_code}）"
+        )
+    if reason == "watchdog-forced-stop":
+        return f"看门狗已停止 Mihomo 核心（退出代码 {return_code}）"
+    if reason == "core-clean-exit":
+        return "Mihomo 核心意外提前退出（退出代码 0）"
+    return f"Mihomo 核心异常退出（退出代码 {return_code}）"
 
 
 
@@ -68,12 +106,17 @@ class MihomoSupervisor:
         self.stop_request = runtime_root / "mihomo-runtime-stop.txt"
         self.stdout_path = runtime_root / "mihomo-runtime-stdout.log"
         self.stderr_path = runtime_root / "mihomo-runtime-stderr.log"
+        self.watchdog_report_path = runtime_root / WATCHDOG_REPORT_NAME
         self.controller_access_path = runtime_root / "mihomo-controller-access.json"
         self.controller_secret = secrets.token_urlsafe(32)
         self.core: subprocess.Popen[bytes] | None = None
         self.watchdog: subprocess.Popen[bytes] | None = None
         self._stdout: Any = None
         self._stderr: Any = None
+        self._heartbeat_stop = threading.Event()
+        self._heartbeat_thread: threading.Thread | None = None
+        self.last_core_exit_code: int | None = None
+        self.last_core_exit_reason: str | None = None
         self.checkpoint = "created"
         self.health_checks: dict[str, dict[str, Any]] = {}
         self.profile_summary: dict[str, Any] = {}
@@ -127,8 +170,20 @@ class MihomoSupervisor:
         pending_count = 0
         while not self.stop_request.exists():
             self._touch_heartbeat()
-            if self.core is None or self.core.poll() is not None:
-                raise SupervisorError("Mihomo exited unexpectedly")
+            if self.core is None:
+                raise SupervisorError("Mihomo process handle is missing")
+            return_code = self.core.poll()
+            if return_code is not None:
+                self._stop_heartbeat_worker()
+                watchdog_report = _read_json(self.watchdog_report_path)
+                if watchdog_report and int(watchdog_report.get("corePid") or 0) != self.core.pid:
+                    watchdog_report = None
+                return_code = normalize_windows_exit_code(return_code)
+                self.last_core_exit_code = return_code
+                self.last_core_exit_reason = classify_core_exit(
+                    return_code, watchdog_report
+                )
+                raise SupervisorError(describe_core_exit(return_code, self.last_core_exit_reason))
             if not self.manage_v2rayn:
                 time.sleep(3)
                 continue
@@ -234,10 +289,13 @@ class MihomoSupervisor:
             self.state_path,
             self.heartbeat_path,
             self.cancel_path,
-            self.stdout_path,
-            self.stderr_path,
+            self.watchdog_report_path,
         ):
             path.unlink(missing_ok=True)
+        _rotate_log(self.stdout_path)
+        _rotate_log(self.stderr_path)
+        self.last_core_exit_code = None
+        self.last_core_exit_reason = None
         self._touch_heartbeat()
         self.watchdog = subprocess.Popen(
             [
@@ -257,10 +315,12 @@ class MihomoSupervisor:
                 str(self.heartbeat_path),
                 "-HeartbeatStaleSeconds",
                 "20",
+                "-HeartbeatConfirmSeconds",
+                "30",
                 "-CancelFilePath",
                 str(self.cancel_path),
                 "-ReportFileName",
-                "mihomo-runtime-watchdog-report.json",
+                WATCHDOG_REPORT_NAME,
             ],
             creationflags=CREATE_NO_WINDOW,
         )
@@ -290,6 +350,7 @@ class MihomoSupervisor:
                 "expectedPort": self.mixed_port,
             },
         )
+        self._start_heartbeat_worker()
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
             self._touch_heartbeat()
@@ -309,6 +370,7 @@ class MihomoSupervisor:
             self.cancel_path.write_text("cancel", encoding="ascii")
         except OSError:
             pass
+        self._stop_heartbeat_worker()
         if self.core is not None and self.core.poll() is None:
             try:
                 self.core.terminate()
@@ -434,6 +496,33 @@ if ($owner) {
     def _touch_heartbeat(self) -> None:
         self.heartbeat_path.write_text(str(time.time_ns()), encoding="ascii")
 
+    def _start_heartbeat_worker(self) -> None:
+        self._stop_heartbeat_worker()
+        self._heartbeat_stop.clear()
+
+        def heartbeat_loop() -> None:
+            while not self._heartbeat_stop.wait(3):
+                try:
+                    self._touch_heartbeat()
+                except OSError:
+                    # The watchdog still handles a supervisor that genuinely
+                    # disappears; a transient write failure should not crash it.
+                    pass
+
+        self._heartbeat_thread = threading.Thread(
+            target=heartbeat_loop,
+            name="mihomo-heartbeat",
+            daemon=True,
+        )
+        self._heartbeat_thread.start()
+
+    def _stop_heartbeat_worker(self) -> None:
+        self._heartbeat_stop.set()
+        thread = self._heartbeat_thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=2)
+        self._heartbeat_thread = None
+
     def _write_status(
         self,
         state: str,
@@ -468,6 +557,10 @@ if ($owner) {
             value["errorMessage"] = error_message
         if error_check is not None:
             value["errorCheck"] = error_check
+        if self.last_core_exit_code is not None:
+            value["coreExitCode"] = self.last_core_exit_code
+        if self.last_core_exit_reason is not None:
+            value["coreExitReason"] = self.last_core_exit_reason
         _write_atomic_json(self.status_path, value)
 
     def _delete_sensitive_files(self) -> None:
@@ -591,6 +684,26 @@ def _write_atomic_json(path: Path, value: object) -> None:
         path.write_text(payload, encoding="utf-8")
     except OSError:
         return
+
+
+def _read_json(path: Path) -> dict[str, Any] | None:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _rotate_log(path: Path) -> None:
+    if not path.exists():
+        return
+    previous = path.with_name(f"{path.stem}.previous{path.suffix}")
+    try:
+        previous.unlink(missing_ok=True)
+        path.replace(previous)
+    except OSError:
+        # Starting the core is more important than retaining an old diagnostic.
+        path.unlink(missing_ok=True)
 
 
 def main() -> int:

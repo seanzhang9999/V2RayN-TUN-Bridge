@@ -5,6 +5,7 @@ param(
     [int]$TimeoutSeconds = 86400,
     [Parameter(Mandatory)] [string]$HeartbeatFilePath,
     [int]$HeartbeatStaleSeconds = 20,
+    [int]$HeartbeatConfirmSeconds = 30,
     [Parameter(Mandatory)] [string]$CancelFilePath,
     [string]$ReportFileName = 'mihomo-runtime-watchdog-report.json'
 )
@@ -52,6 +53,7 @@ do {
 
 $cancelled = Test-Path -LiteralPath $CancelFilePath
 $heartbeatExpired = $false
+$staleObservedAt = $null
 $deadline = [DateTimeOffset]::UtcNow.AddSeconds($TimeoutSeconds)
 while ($state -and -not $cancelled -and (Test-ExactProcess -State $state)) {
     if (Test-Path -LiteralPath $CancelFilePath) {
@@ -59,11 +61,19 @@ while ($state -and -not $cancelled -and (Test-ExactProcess -State $state)) {
         break
     }
     $heartbeat = Get-Item -LiteralPath $HeartbeatFilePath -ErrorAction SilentlyContinue
-    if ($heartbeat -and (([DateTimeOffset]::UtcNow - $heartbeat.LastWriteTimeUtc).TotalSeconds -gt $HeartbeatStaleSeconds)) {
+    $now = [DateTimeOffset]::UtcNow
+    $heartbeatFresh = $heartbeat -and (($now - $heartbeat.LastWriteTimeUtc).TotalSeconds -le $HeartbeatStaleSeconds)
+    if ($heartbeatFresh) {
+        $staleObservedAt = $null
+    } elseif (-not $staleObservedAt) {
+        # A laptop sleep/resume pauses both the supervisor and its heartbeat.
+        # Give the supervisor a full confirmation window to recover after wake.
+        $staleObservedAt = $now
+    } elseif (($now - $staleObservedAt).TotalSeconds -ge $HeartbeatConfirmSeconds) {
         $heartbeatExpired = $true
         break
     }
-    if ([DateTimeOffset]::UtcNow -ge $deadline) { break }
+    if ($now -ge $deadline) { break }
     Start-Sleep -Milliseconds 300
 }
 
@@ -77,8 +87,11 @@ Remove-Item -LiteralPath (Join-Path $runtimeRoot 'mihomo-controller-access.json'
 [ordered]@{
     startedAt = $startedAt.ToString('o')
     finishedAt = [DateTimeOffset]::UtcNow.ToString('o')
+    corePid = if ($state) { [int]$state.pid } else { $null }
     cancelled = $cancelled
     heartbeatExpired = $heartbeatExpired
+    staleConfirmationSeconds = $HeartbeatConfirmSeconds
     forcedStop = $forcedStop
+    reason = if ($heartbeatExpired) { 'heartbeat-timeout' } elseif ($forcedStop) { 'forced-stop' } elseif ($cancelled) { 'cancelled' } else { 'core-exited' }
 } | ConvertTo-Json | Set-Content -LiteralPath $reportPath -Encoding utf8
 exit 0

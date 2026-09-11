@@ -14,12 +14,13 @@ from pathlib import Path
 from typing import Any
 from tkinter import filedialog, messagebox, Tk, StringVar, BooleanVar, Text, ttk
 
+from tun_bridge import __version__
 from tun_bridge.resources import resource_root
 from tun_gui.monitor import (
     ConnectionAccumulator,
     fetch_connections,
+    format_connection_rate,
     format_rate,
-    format_transfer,
 )
 from tun_controller.v2rayn_source import DEFAULT_APP_ROOT, list_v2rayn_profiles
 
@@ -29,6 +30,70 @@ RUNTIME_ROOT = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Lo
 STATUS_PATH = RUNTIME_ROOT / "mihomo-runtime-report.json"
 SETTINGS_PATH = RUNTIME_ROOT / "gui-settings.json"
 CONTROLLER_ACCESS_PATH = RUNTIME_ROOT / "mihomo-controller-access.json"
+APP_TITLE = f"V2RayN TUN Bridge v{__version__}"
+
+
+class StatusFileWatcher:
+    """Read status only when its file identity changes."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._initialized = False
+        self._signature: tuple[int, int] | None = None
+        self._value: dict[str, Any] | None = None
+
+    def poll(self) -> tuple[bool, dict[str, Any] | None]:
+        try:
+            stat = self.path.stat()
+            signature = (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            changed = not self._initialized or self._signature is not None
+            self._initialized = True
+            self._signature = None
+            self._value = None
+            return changed, None
+
+        if self._initialized and signature == self._signature:
+            return False, self._value
+        try:
+            value = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            # A writer may be between replace operations. Retry on the next poll
+            # instead of caching an unreadable version.
+            return False, self._value
+        if not isinstance(value, dict):
+            return False, self._value
+        self._initialized = True
+        self._signature = signature
+        self._value = value
+        return True, value
+
+
+def _process_exists(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    process_query_limited_information = 0x1000
+    handle = ctypes.windll.kernel32.OpenProcess(
+        process_query_limited_information, False, pid
+    )
+    if handle:
+        ctypes.windll.kernel32.CloseHandle(handle)
+        return True
+    # Access denied still proves that a protected/elevated process exists.
+    return ctypes.windll.kernel32.GetLastError() == 5
+
+
+def status_is_live(
+    status: dict[str, Any], *, process_exists: Any = _process_exists
+) -> bool:
+    active_states = {"starting", "running", "restarting", "stopping"}
+    if str(status.get("state") or "") not in active_states:
+        return True
+    try:
+        supervisor_pid = int(status.get("supervisorPid") or 0)
+    except (TypeError, ValueError):
+        return False
+    return bool(supervisor_pid and process_exists(supervisor_pid))
 
 
 def build_control_command(
@@ -75,10 +140,11 @@ class TunGuiApp:
 
     def __init__(self) -> None:
         self.root = Tk()
-        self.root.title("V2RayN TUN Bridge")
+        self.root.title(APP_TITLE)
         self.root.geometry("980x820")
         self.root.configure(bg="#101820")
         self.root.minsize(900, 680)
+        self._status_watcher = StatusFileWatcher(STATUS_PATH)
 
         self.style = ttk.Style(self.root)
         self._configure_style()
@@ -139,7 +205,11 @@ class TunGuiApp:
         body = ttk.Frame(self.root, padding=16)
         body.pack(fill="both", expand=True)
 
-        title = ttk.Label(body, text="Mihomo TUN 控制台", style="Title.TLabel")
+        title = ttk.Label(
+            body,
+            text=f"Mihomo TUN 控制台 · v{__version__}",
+            style="Title.TLabel",
+        )
         title.pack(anchor="w", pady=(0, 10))
 
         self._build_config_section(body)
@@ -292,7 +362,7 @@ class TunGuiApp:
             "source": "入口",
             "route": "出口",
             "process": "进程",
-            "traffic": "累计流量",
+            "traffic": "即时速度",
         }
         widths = {
             "time": 70,
@@ -513,7 +583,10 @@ class TunGuiApp:
                     source,
                     route,
                     item.get("process", "—"),
-                    format_transfer(int(item.get("upload", 0)), int(item.get("download", 0))),
+                    format_connection_rate(
+                        float(item.get("up_rate", 0.0)),
+                        float(item.get("down_rate", 0.0)),
+                    ),
                 ),
             )
 
@@ -595,9 +668,11 @@ class TunGuiApp:
         self._begin_command("Stop")
 
     def _poll_status(self) -> None:
-        status = self._safe_read_json(STATUS_PATH)
+        changed, status = self._status_watcher.poll()
         if status:
             state = str(status.get("state") or "unknown")
+            if not status_is_live(status):
+                state = "stale"
             checkpoint = str(status.get("checkpoint") or "")
             selected = status.get("selectedProfile") or {}
             if isinstance(selected, dict):
@@ -645,7 +720,8 @@ class TunGuiApp:
                 if error_message:
                     detail = f"{detail}，信息：{error_message}"
                 self.message_var.set(f"运行失败：{detail}")
-                self._append_log(f"运行状态: failed - {detail}")
+                if changed:
+                    self._append_log(f"运行状态: failed - {detail}")
             elif state == "running":
                 if checkpoint.startswith("health-") or checkpoint == "connectivity-tests":
                     self.message_var.set("TUN 已运行，正在收集网站检测结果（结果不影响运行）")
@@ -653,6 +729,8 @@ class TunGuiApp:
                     self.message_var.set("TUN 已在线运行；网站检测结果仅供参考")
             elif state == "stopped":
                 self.message_var.set("TUN 已停止，1081 已释放；可按需手动启动 v2rayN")
+            elif state == "stale":
+                self.message_var.set("上次运行状态已过期；请以当前连接监控或重新启动结果为准")
         else:
             self.status_var.set(_pretty_state("not-started"))
             self.checkpoint_var.set("—")
@@ -708,6 +786,7 @@ def _pretty_state(state: str) -> str:
         "online-health-check": "执行连通检测",
         "starting": "启动中",
         "running": "运行中",
+        "stale": "状态已过期",
         "restarting": "重新配置",
         "stopping": "停止中",
         "stopped": "已停止",
