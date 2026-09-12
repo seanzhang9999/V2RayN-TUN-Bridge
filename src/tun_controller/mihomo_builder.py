@@ -118,6 +118,8 @@ def build_mihomo_config(
             "respect-rules": True,
             "nameserver": ["https://1.1.1.1/dns-query#PROXY"],
             "proxy-server-nameserver": ["system"],
+            "direct-nameserver": ["system"],
+            "direct-nameserver-follow-policy": False,
         },
         "tun": tun,
         "proxies": [

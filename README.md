@@ -24,6 +24,7 @@ the actual TUN path.
 - Lists Bridge-managed Proxy and Direct entries for copy/edit, merge, deduplication, and replacement.
 - Captures an in-memory traffic window with every observed hostname, IP, inbound, route, process, and connection count.
 - Recovers HTTP, TLS, and QUIC hostnames from IP-only TUN connections so domain routing still applies when a browser uses encrypted DNS.
+- Re-resolves Direct-route domains with the current system DNS so domestic CDN traffic does not inherit an overseas proxy DNS answer.
 - Portable Windows build: no Python installation required.
 
 ## Download and run

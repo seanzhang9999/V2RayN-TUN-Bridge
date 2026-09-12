@@ -203,7 +203,9 @@ class MihomoBuilderTests(unittest.TestCase):
         self.assertFalse(dns["ipv6"])
         self.assertEqual(dns["enhanced-mode"], "fake-ip")
         self.assertEqual(dns["nameserver"], ["https://1.1.1.1/dns-query#PROXY"])
-        self.assertNotIn("direct-nameserver", dns)
+        self.assertEqual(dns["proxy-server-nameserver"], ["system"])
+        self.assertEqual(dns["direct-nameserver"], ["system"])
+        self.assertFalse(dns["direct-nameserver-follow-policy"])
         self.assertIn("any:53", self.build()["tun"]["dns-hijack"])
 
     def test_sniffer_recovers_domains_from_ip_only_tun_connections(self):
