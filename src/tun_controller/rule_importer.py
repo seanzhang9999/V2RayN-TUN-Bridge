@@ -20,7 +20,9 @@ def parse_switchyomega_rules(raw: str) -> ImportResult:
     rules: list[RoutingRule] = []
     skipped: list[str] = []
     for index, raw_line in enumerate(raw.splitlines(), start=1):
-        line = raw_line.strip()
+        # v2rayN displays list values with trailing commas in several editors,
+        # so accept copied lines in both `domain:x` and `domain:x,` form.
+        line = raw_line.strip().rstrip(",").strip()
         if not line or line.startswith(";") or (line.startswith("[") and line.endswith("]")):
             continue
         negative = line.startswith("!")
@@ -51,6 +53,8 @@ def parse_switchyomega_rules(raw: str) -> ImportResult:
 
 
 def _normalize_entry(line: str) -> tuple[str, str] | None:
+    if "," in line:
+        return None
     if line.startswith(("domain:", "full:", "ip:")):
         prefix, value = line.split(":", 1)
         return (prefix, value.strip()) if value.strip() else None

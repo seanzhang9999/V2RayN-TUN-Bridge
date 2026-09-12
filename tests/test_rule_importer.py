@@ -27,6 +27,25 @@ class RuleImporterTests(unittest.TestCase):
         self.assertEqual(len(result.rules), 4)
         self.assertEqual(result.skipped, ())
 
+    def test_accepts_v2rayn_style_trailing_commas(self):
+        result = parse_switchyomega_rules(
+            "domain:openagi.duckdns.org,\ndomain:qq.com,\nfull:internal.example.com"
+        )
+        self.assertEqual(
+            [rule.domains[0] for rule in result.rules],
+            [
+                "domain:openagi.duckdns.org",
+                "domain:qq.com",
+                "full:internal.example.com",
+            ],
+        )
+        self.assertEqual(result.skipped, ())
+
+    def test_rejects_embedded_commas_in_domain(self):
+        result = parse_switchyomega_rules("domain:qq.com,domain:baidu.com")
+        self.assertEqual(result.rules, ())
+        self.assertEqual(len(result.skipped), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
