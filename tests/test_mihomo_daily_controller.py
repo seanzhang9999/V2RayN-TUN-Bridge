@@ -12,8 +12,12 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 from tun_controller.mihomo_supervisor import (
     MihomoSupervisor,
     SourceSnapshot,
+    SupervisorError,
+    append_failure_history,
+    await_watchdog_report,
     classify_core_exit,
     describe_core_exit,
+    load_failure_history,
     normalize_windows_exit_code,
 )
 from tun_controller.network_monitor import NetworkSignature
@@ -72,6 +76,10 @@ class MihomoDailyControllerTests(unittest.TestCase):
             "-Verb RunAs -ArgumentList $arguments -WindowStyle Hidden -PassThru",
             text,
         )
+        self.assertIn("Move-PreviousDiagnostic -Path $StatusPath", text)
+        self.assertIn("Move-PreviousDiagnostic -Path $SupervisorStdout", text)
+        self.assertIn("Move-PreviousDiagnostic -Path $SupervisorStderr", text)
+        self.assertIn("$attempt -lt 5", text)
 
     def test_supervisor_arms_watchdog_and_runs_informational_checks_after_start(self):
         text = (PROJECT_ROOT / "src/tun_controller/mihomo_supervisor.py").read_text(
@@ -123,6 +131,16 @@ class MihomoDailyControllerTests(unittest.TestCase):
         )
         self.assertEqual(classify_core_exit(2, None), "core-error-exit")
 
+    def test_watchdog_report_must_match_the_exited_core(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            report_path = Path(temp_dir) / "watchdog.json"
+            report_path.write_text('{"corePid":321,"forcedStop":true}', encoding="utf-8")
+            self.assertEqual(
+                await_watchdog_report(report_path, 321, timeout=0),
+                {"corePid": 321, "forcedStop": True},
+            )
+            self.assertIsNone(await_watchdog_report(report_path, 999, timeout=0))
+
     def test_windows_unsigned_exit_code_is_normalized(self):
         self.assertEqual(normalize_windows_exit_code(4294967295), -1)
         self.assertEqual(normalize_windows_exit_code(2), 2)
@@ -139,6 +157,38 @@ class MihomoDailyControllerTests(unittest.TestCase):
         self.assertIn("$staleObservedAt", text)
         self.assertIn("$heartbeatFresh", text)
         self.assertIn("staleConfirmationSeconds", text)
+
+    def test_failure_history_is_bounded_and_recovers_from_corruption(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            history_path = Path(temp_dir) / "failure-history.json"
+            history_path.write_text("not-json", encoding="utf-8")
+            for sequence in range(25):
+                append_failure_history(history_path, {"sequence": sequence})
+
+            history = load_failure_history(history_path)
+
+        self.assertEqual(len(history), 20)
+        self.assertEqual(history[0]["sequence"], 5)
+        self.assertEqual(history[-1]["sequence"], 24)
+
+    def test_supervisor_persists_a_safe_failure_summary(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            supervisor = MihomoSupervisor(root, root, PROJECT_ROOT)
+            supervisor._snapshot = mock.Mock(
+                side_effect=SupervisorError("synthetic safe failure")
+            )
+
+            result = supervisor.run()
+            history = load_failure_history(root / "mihomo-failure-history.json")
+
+        self.assertEqual(result, 2)
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["errorCheckpoint"], "initial-snapshot")
+        self.assertEqual(history[0]["errorMessage"], "synthetic safe failure")
+        serialized = str(history[0]).casefold()
+        self.assertNotIn("password", serialized)
+        self.assertNotIn("secret", serialized)
 
     def test_supervisor_uses_independent_heartbeat_worker(self):
         text = (PROJECT_ROOT / "src/tun_controller/mihomo_supervisor.py").read_text(

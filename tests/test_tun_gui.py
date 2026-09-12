@@ -11,6 +11,7 @@ from tun_gui.app import (
     CONTROL_SCRIPT,
     StatusFileWatcher,
     build_control_command,
+    format_persisted_failure,
     status_is_live,
 )
 from tun_bridge import __version__
@@ -18,8 +19,21 @@ from tun_bridge import __version__
 
 class TunGuiCommandTests(unittest.TestCase):
     def test_version_is_visible_in_application_title(self):
-        self.assertEqual(__version__, "0.1.4")
-        self.assertIn("v0.1.4", APP_TITLE)
+        self.assertEqual(__version__, "0.1.5")
+        self.assertIn("v0.1.5", APP_TITLE)
+
+    def test_persisted_failure_is_clearly_historical(self):
+        message = format_persisted_failure(
+            {
+                "failedAt": "2026-09-12T01:15:00Z",
+                "errorCheckpoint": "monitoring",
+                "errorMessage": "核心异常退出",
+                "coreExitCode": -1,
+            }
+        )
+        self.assertIn("历史失败", message)
+        self.assertIn("monitoring", message)
+        self.assertIn("-1", message)
 
     def test_start_uses_the_shared_powershell_control_script(self):
         app_root = Path(r"C:\fixture\v2rayN")

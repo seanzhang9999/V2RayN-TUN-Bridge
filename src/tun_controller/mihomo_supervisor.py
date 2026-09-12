@@ -26,6 +26,8 @@ WINDOWS_EPOCH_TICKS = 504_911_232_000_000_000
 TUN_NAME = "mihomo_tun_controller"
 CONTROLLER_PORT = 19092
 WATCHDOG_REPORT_NAME = "mihomo-runtime-watchdog-report.json"
+FAILURE_HISTORY_NAME = "mihomo-failure-history.json"
+FAILURE_HISTORY_LIMIT = 20
 
 
 class SupervisorError(RuntimeError):
@@ -68,6 +70,46 @@ def describe_core_exit(return_code: int, reason: str) -> str:
     return f"Mihomo 核心异常退出（退出代码 {return_code}）"
 
 
+def load_failure_history(path: Path) -> list[dict[str, Any]]:
+    """Read the bounded local failure history, tolerating partial old data."""
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
+def append_failure_history(
+    path: Path,
+    record: dict[str, Any],
+    *,
+    limit: int = FAILURE_HISTORY_LIMIT,
+) -> None:
+    """Atomically append one safe record while keeping storage bounded."""
+    history = load_failure_history(path)
+    history.append(record)
+    _write_atomic_json(path, history[-max(limit, 1) :])
+
+
+def await_watchdog_report(
+    path: Path,
+    core_pid: int,
+    *,
+    timeout: float = 1.5,
+) -> dict[str, Any] | None:
+    """Wait briefly for the watchdog's atomic report for this exact core."""
+    deadline = time.monotonic() + max(timeout, 0.0)
+    while True:
+        report = _read_json(path)
+        if report and int(report.get("corePid") or 0) == core_pid:
+            return report
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(0.05)
+
+
 
 @dataclass(frozen=True)
 class SourceSnapshot:
@@ -107,6 +149,7 @@ class MihomoSupervisor:
         self.stdout_path = runtime_root / "mihomo-runtime-stdout.log"
         self.stderr_path = runtime_root / "mihomo-runtime-stderr.log"
         self.watchdog_report_path = runtime_root / WATCHDOG_REPORT_NAME
+        self.failure_history_path = runtime_root / FAILURE_HISTORY_NAME
         self.controller_access_path = runtime_root / "mihomo-controller-access.json"
         self.controller_secret = secrets.token_urlsafe(32)
         self.core: subprocess.Popen[bytes] | None = None
@@ -162,6 +205,7 @@ class MihomoSupervisor:
                 error_checkpoint=self.checkpoint,
                 error_message=str(exc),
             )
+            self._record_failure(exc)
             self._delete_sensitive_files()
             return 2
 
@@ -175,9 +219,9 @@ class MihomoSupervisor:
             return_code = self.core.poll()
             if return_code is not None:
                 self._stop_heartbeat_worker()
-                watchdog_report = _read_json(self.watchdog_report_path)
-                if watchdog_report and int(watchdog_report.get("corePid") or 0) != self.core.pid:
-                    watchdog_report = None
+                watchdog_report = await_watchdog_report(
+                    self.watchdog_report_path, self.core.pid
+                )
                 return_code = normalize_windows_exit_code(return_code)
                 self.last_core_exit_code = return_code
                 self.last_core_exit_reason = classify_core_exit(
@@ -289,9 +333,9 @@ class MihomoSupervisor:
             self.state_path,
             self.heartbeat_path,
             self.cancel_path,
-            self.watchdog_report_path,
         ):
             path.unlink(missing_ok=True)
+        _rotate_log(self.watchdog_report_path)
         _rotate_log(self.stdout_path)
         _rotate_log(self.stderr_path)
         self.last_core_exit_code = None
@@ -563,6 +607,49 @@ if ($owner) {
             value["coreExitReason"] = self.last_core_exit_reason
         _write_atomic_json(self.status_path, value)
 
+    def _record_failure(self, error: Exception) -> None:
+        """Persist a bounded, credential-free summary for later diagnosis."""
+        watchdog = _read_json(self.watchdog_report_path) or {}
+        watchdog_summary = {
+            key: watchdog.get(key)
+            for key in (
+                "startedAt",
+                "finishedAt",
+                "corePid",
+                "cancelled",
+                "heartbeatExpired",
+                "staleConfirmationSeconds",
+                "forcedStop",
+                "reason",
+            )
+            if key in watchdog
+        }
+        record: dict[str, Any] = {
+            "schemaVersion": 1,
+            "failedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "errorType": type(error).__name__,
+            "errorCheckpoint": self.checkpoint,
+            "errorMessage": str(error),
+            "selectedProfile": dict(self.profile_summary),
+            "logs": {
+                "coreStdout": self.stdout_path.name,
+                "coreStderr": self.stderr_path.name,
+                "supervisorStdout": "mihomo-supervisor-stdout.log",
+                "supervisorStderr": "mihomo-supervisor-stderr.log",
+            },
+        }
+        if self.last_core_exit_code is not None:
+            record["coreExitCode"] = self.last_core_exit_code
+        if self.last_core_exit_reason is not None:
+            record["coreExitReason"] = self.last_core_exit_reason
+        if watchdog_summary:
+            record["watchdog"] = watchdog_summary
+        try:
+            append_failure_history(self.failure_history_path, record)
+        except OSError:
+            # Diagnostic retention must never interfere with safe cleanup.
+            pass
+
     def _delete_sensitive_files(self) -> None:
         for path in (
             self.config_path,
@@ -698,12 +785,14 @@ def _rotate_log(path: Path) -> None:
     if not path.exists():
         return
     previous = path.with_name(f"{path.stem}.previous{path.suffix}")
-    try:
-        previous.unlink(missing_ok=True)
-        path.replace(previous)
-    except OSError:
-        # Starting the core is more important than retaining an old diagnostic.
-        path.unlink(missing_ok=True)
+    for attempt in range(5):
+        try:
+            previous.unlink(missing_ok=True)
+            path.replace(previous)
+            return
+        except OSError:
+            if attempt < 4:
+                time.sleep(0.05 * (attempt + 1))
 
 
 def main() -> int:

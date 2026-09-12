@@ -59,6 +59,23 @@ function Protect-RuntimeRoot {
     if ($LASTEXITCODE -ne 0) { throw 'runtime-acl-failed' }
 }
 
+function Move-PreviousDiagnostic([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return }
+    $directory = Split-Path -Parent $Path
+    $name = [IO.Path]::GetFileNameWithoutExtension($Path)
+    $extension = [IO.Path]::GetExtension($Path)
+    $previous = Join-Path $directory ("{0}.previous{1}" -f $name, $extension)
+    for ($attempt = 0; $attempt -lt 5; $attempt++) {
+        try {
+            Remove-Item -LiteralPath $previous -Force -ErrorAction SilentlyContinue
+            Move-Item -LiteralPath $Path -Destination $previous -Force -ErrorAction Stop
+            return
+        } catch {
+            Start-Sleep -Milliseconds (50 * ($attempt + 1))
+        }
+    }
+}
+
 function Read-SafeStatus {
     if (-not (Test-Path -LiteralPath $StatusPath)) { return $null }
     try {
@@ -95,7 +112,10 @@ if ($Action -eq 'Start') {
     if ($existing -and $existing.state -eq 'running' -and (Test-SupervisorRunning -Status $existing)) {
         exit 0
     }
-    Remove-Item -LiteralPath $StatusPath, $StopRequestPath, $SupervisorStdout, $SupervisorStderr -Force -ErrorAction SilentlyContinue
+    Move-PreviousDiagnostic -Path $StatusPath
+    Move-PreviousDiagnostic -Path $SupervisorStdout
+    Move-PreviousDiagnostic -Path $SupervisorStderr
+    Remove-Item -LiteralPath $StopRequestPath -Force -ErrorAction SilentlyContinue
     Write-Host '[1/3] Reading the selected v2rayN node and physical network...'
     $arguments = @(
         '--runtime-root', ('"{0}"' -f $RuntimeRoot),

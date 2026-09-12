@@ -54,6 +54,13 @@ The app asks the core for strict process detection. Windows can still label
 some service, kernel, UDP, or very short-lived traffic as unknown. Monitoring
 data remains in memory and is not written to disk.
 
+Failure diagnostics are different from connection history. The protected local
+runtime directory keeps up to 20 credential-free failure summaries plus one
+rotated copy of the previous status, watchdog report, core log, and supervisor
+log. This evidence survives a restart so a later investigation can identify
+the failed checkpoint and exit reason. Generated proxy configuration and
+controller secrets are never added to the history.
+
 ## Requirements and limitations
 
 - Windows 11 x64; Windows 10 may work but is not yet a release target.

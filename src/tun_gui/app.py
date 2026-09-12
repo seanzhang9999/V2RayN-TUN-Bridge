@@ -30,6 +30,7 @@ RUNTIME_ROOT = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Lo
 STATUS_PATH = RUNTIME_ROOT / "mihomo-runtime-report.json"
 SETTINGS_PATH = RUNTIME_ROOT / "gui-settings.json"
 CONTROLLER_ACCESS_PATH = RUNTIME_ROOT / "mihomo-controller-access.json"
+FAILURE_HISTORY_PATH = RUNTIME_ROOT / "mihomo-failure-history.json"
 APP_TITLE = f"V2RayN TUN Bridge v{__version__}"
 
 
@@ -94,6 +95,27 @@ def status_is_live(
     except (TypeError, ValueError):
         return False
     return bool(supervisor_pid and process_exists(supervisor_pid))
+
+
+def read_latest_failure(path: Path) -> dict[str, Any] | None:
+    """Read the newest persisted failure without affecting current status."""
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(value, list):
+        return None
+    return next((item for item in reversed(value) if isinstance(item, dict)), None)
+
+
+def format_persisted_failure(record: dict[str, Any]) -> str:
+    """Format a persisted record as an explicitly historical GUI log line."""
+    failed_at = str(record.get("failedAt") or "时间未知")
+    checkpoint = str(record.get("errorCheckpoint") or "unknown")
+    message = str(record.get("errorMessage") or "未记录错误信息")
+    exit_code = record.get("coreExitCode")
+    exit_text = f"，核心退出代码 {exit_code}" if exit_code is not None else ""
+    return f"最近一次历史失败 [{failed_at}] {checkpoint}：{message}{exit_text}"
 
 
 def build_control_command(
@@ -172,6 +194,7 @@ class TunGuiApp:
         self._connection_accumulator = ConnectionAccumulator()
 
         self._build_ui()
+        self._append_persisted_failure()
         self._load_settings()
         self.refresh_profiles()
         self._poll_status()
@@ -400,6 +423,11 @@ class TunGuiApp:
             return json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return None
+
+    def _append_persisted_failure(self) -> None:
+        failure = read_latest_failure(FAILURE_HISTORY_PATH)
+        if failure:
+            self._append_log(format_persisted_failure(failure))
 
     def _load_settings(self) -> None:
         data = self._safe_read_json(SETTINGS_PATH)
