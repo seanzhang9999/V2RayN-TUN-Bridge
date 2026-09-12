@@ -17,7 +17,7 @@ DNS 异常或内核流量回环。
   即时上下行速度及代理/直连出口。
 - Wi-Fi 或物理出口变化后自动重建配置。
 - Google、ChatGPT、Baidu 检测仅作提示，不决定 TUN 是否启动成功。
-- 可将 SwitchyOmega 条件列表转换为 v2rayN 可粘贴规则，并按代理、直连分组排序。
+- 可将 SwitchyOmega 条件写入 v2rayN 当前激活路由，自动备份原路由并重启 Bridge 加载；代理、直连规则分组排序。
 - 提供免安装 Python 的 Windows 便携版。
 
 ## 下载使用

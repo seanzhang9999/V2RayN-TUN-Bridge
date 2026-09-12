@@ -23,6 +23,7 @@ from tun_gui.monitor import (
     format_rate,
 )
 from tun_controller.rule_importer import format_for_v2rayn_rules, parse_switchyomega_rules
+from tun_controller.v2rayn_route_writer import update_active_v2rayn_route
 from tun_controller.v2rayn_source import DEFAULT_APP_ROOT, list_v2rayn_profiles
 
 PROJECT_ROOT = resource_root()
@@ -611,11 +612,101 @@ class TunGuiApp:
             self.root.clipboard_clear()
             self.root.clipboard_append(output_box.get("1.0", "end").strip())
 
+        def apply_and_restart() -> None:
+            raw = input_box.get("1.0", "end")
+            parsed = parse_switchyomega_rules(raw)
+            if not parsed.rules:
+                messagebox.showwarning("提示", "没有可写入的规则")
+                return
+            self._begin_route_update(parsed.rules)
+
         button_row = ttk.Frame(output_frame)
         button_row.pack(fill="x", pady=(8, 0))
         ttk.Button(button_row, text="粘贴并转换", command=paste_and_convert).pack(side="left")
         ttk.Button(button_row, text="开始转换", command=convert).pack(side="left", padx=(8, 0))
         ttk.Button(button_row, text="复制结果", command=copy_result).pack(side="left", padx=(8, 0))
+        ttk.Button(
+            button_row,
+            text="写入激活路由并重启 Bridge",
+            command=apply_and_restart,
+        ).pack(side="left", padx=(8, 0))
+
+    def _begin_route_update(self, rules: tuple[Any, ...]) -> None:
+        if self._busy:
+            messagebox.showwarning("提示", "当前有操作正在执行，请稍候")
+            return
+        app_root_text = self.app_root_var.get().strip()
+        profile_id = self._get_selected_profile_id()
+        if not app_root_text or not profile_id:
+            messagebox.showwarning("提示", "请先选择有效的 v2rayN 目录和节点")
+            return
+        self._save_settings()
+        self._set_busy(True)
+        self.message_var.set("正在备份并更新 v2rayN 激活路由…")
+        self._append_log("开始更新 v2rayN 激活路由；写入前将自动备份原路由")
+        threading.Thread(
+            target=self._run_route_update,
+            args=(
+                Path(app_root_text),
+                profile_id,
+                tuple(rules),
+                bool(self.manual_var.get()),
+                self._is_admin(),
+            ),
+            daemon=True,
+        ).start()
+
+    def _run_route_update(
+        self,
+        app_root: Path,
+        profile_id: str,
+        rules: tuple[Any, ...],
+        manual_v2rayn: bool,
+        elevated: bool,
+    ) -> None:
+        try:
+            report = update_active_v2rayn_route(
+                app_root,
+                rules,
+                backup_root=RUNTIME_ROOT / "route-backups",
+            )
+            executable = Path(sys.executable) if getattr(sys, "frozen", False) else None
+            stop = subprocess.run(
+                build_control_command(
+                    "Stop", app_root, elevated=elevated, app_executable=executable
+                ),
+                cwd=PROJECT_ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            start = subprocess.run(
+                build_control_command(
+                    "Start",
+                    app_root,
+                    profile_id=profile_id,
+                    manual_v2rayn=manual_v2rayn,
+                    elevated=elevated,
+                    app_executable=executable,
+                ),
+                cwd=PROJECT_ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            self._cmd_queue.put(("route-update-done", {
+                "ok": start.returncode == 0,
+                "route": report.get("route_name", ""),
+                "rules": report.get("imported_rule_count", 0),
+                "backup": report.get("backup_path", ""),
+                "stop_code": stop.returncode,
+                "start_code": start.returncode,
+                "detail": (start.stderr or start.stdout or "").strip(),
+            }))
+        except Exception as exc:
+            self._cmd_queue.put(("route-update-done", {"ok": False, "detail": str(exc)}))
 
     def _monitor_loop(self) -> None:
         """Fetch controller data away from Tk's main thread."""
@@ -862,6 +953,20 @@ class TunGuiApp:
                 self.proxy_speed_var.set("↑ 0 B/s    ↓ 0 B/s")
                 self.direct_speed_var.set("↑ 0 B/s    ↓ 0 B/s")
                 self.monitor_status_var.set("等待 TUN 监控接口")
+            elif kind == "route-update-done":
+                self._set_busy(False)
+                if payload.get("ok"):
+                    message = (
+                        f"已向 {payload.get('route')} 写入 {payload.get('rules')} 条规则，"
+                        "Bridge 已重启"
+                    )
+                    self.message_var.set(message)
+                    self._append_log(message)
+                    self._append_log(f"原路由备份：{payload.get('backup')}")
+                else:
+                    detail = payload.get("detail") or "未知错误"
+                    self.message_var.set(f"路由更新或重启失败：{detail}")
+                    self._append_log(f"路由更新或重启失败：{detail}")
         self.root.after(200, self._poll_queue)
 
     def _on_close(self) -> None:
