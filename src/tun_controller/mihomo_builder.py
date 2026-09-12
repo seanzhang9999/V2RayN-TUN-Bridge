@@ -93,6 +93,20 @@ def build_mihomo_config(
         "geo-auto-update": False,
         "unified-delay": True,
         "tcp-concurrent": True,
+        "sniffer": {
+            "enable": True,
+            "force-dns-mapping": True,
+            "parse-pure-ip": True,
+            "override-destination": True,
+            "sniff": {
+                "HTTP": {
+                    "ports": [80, "8080-8880"],
+                    "override-destination": True,
+                },
+                "TLS": {"ports": [443, 8443]},
+                "QUIC": {"ports": [443, 8443]},
+            },
+        },
         "dns": {
             "enable": True,
             "ipv6": False,
@@ -155,6 +169,7 @@ def build_mihomo_safe_summary(
         "tun_enabled": bool(config.get("tun", {}).get("enable")),
         "tun_stack": config.get("tun", {}).get("stack"),
         "dns_mode": config.get("dns", {}).get("enhanced-mode"),
+        "sniffer_enabled": bool(config.get("sniffer", {}).get("enable")),
     }
 
 

@@ -23,6 +23,7 @@ the actual TUN path.
 - Writes SwitchyOmega conditions into v2rayN's active route after a credential-free route backup, then restarts Bridge to load the grouped proxy/direct rules.
 - Lists Bridge-managed Proxy and Direct entries for copy/edit, merge, deduplication, and replacement.
 - Captures an in-memory traffic window with every observed hostname, IP, inbound, route, process, and connection count.
+- Recovers HTTP, TLS, and QUIC hostnames from IP-only TUN connections so domain routing still applies when a browser uses encrypted DNS.
 - Portable Windows build: no Python installation required.
 
 ## Download and run

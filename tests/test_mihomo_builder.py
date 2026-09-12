@@ -206,6 +206,20 @@ class MihomoBuilderTests(unittest.TestCase):
         self.assertNotIn("direct-nameserver", dns)
         self.assertIn("any:53", self.build()["tun"]["dns-hijack"])
 
+    def test_sniffer_recovers_domains_from_ip_only_tun_connections(self):
+        sniffer = self.build()["sniffer"]
+        self.assertTrue(sniffer["enable"])
+        self.assertTrue(sniffer["force-dns-mapping"])
+        self.assertTrue(sniffer["parse-pure-ip"])
+        self.assertTrue(sniffer["override-destination"])
+        self.assertEqual(sniffer["sniff"]["HTTP"]["ports"], [80, "8080-8880"])
+        self.assertEqual(sniffer["sniff"]["TLS"]["ports"], [443, 8443])
+        self.assertEqual(sniffer["sniff"]["QUIC"]["ports"], [443, 8443])
+
+    def test_safe_summary_reports_sniffer_state(self):
+        summary = build_mihomo_safe_summary(imported_config(), self.build())
+        self.assertTrue(summary["sniffer_enabled"])
+
     def test_invalid_mode_and_unsupported_protocol_fail_safely(self):
         with self.assertRaises(MihomoBuildError):
             build_mihomo_config(imported_config(), SIGNATURE, mode="bad")
