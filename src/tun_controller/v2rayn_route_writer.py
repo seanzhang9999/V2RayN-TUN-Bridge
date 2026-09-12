@@ -13,6 +13,39 @@ from tun_controller.models import RoutingRule
 BRIDGE_RULE_IDS = {"tun-bridge-import-proxy", "tun-bridge-import-direct"}
 
 
+def load_managed_v2rayn_rules(app_root: Path) -> dict[str, tuple[RoutingRule, ...]]:
+    """Read only the Proxy/Direct groups previously managed by Bridge."""
+    database_path = app_root / "guiConfigs" / "guiNDB.db"
+    gui_path = app_root / "guiConfigs" / "guiNConfig.json"
+    gui = json.loads(gui_path.read_text(encoding="utf-8-sig"))
+    connection = sqlite3.connect(
+        f"file:{database_path.resolve().as_posix()}?mode=ro", uri=True, timeout=1.0
+    )
+    connection.row_factory = sqlite3.Row
+    try:
+        row = _select_active_route(connection, gui)
+        _, items = _decode_rule_set(str(row["ruleSet"] or "[]"))
+    finally:
+        connection.close()
+    result: dict[str, list[RoutingRule]] = {"proxy": [], "direct": []}
+    for item in items:
+        rule_id = str(item.get("Id") or "")
+        if rule_id not in BRIDGE_RULE_IDS:
+            continue
+        outbound = "direct" if str(item.get("OutboundTag")).lower() == "direct" else "proxy"
+        result[outbound].append(
+            RoutingRule(
+                rule_id=rule_id,
+                remarks=str(item.get("Remarks") or ""),
+                outbound_tag=outbound,
+                domains=_tuple_values(item.get("Domain")),
+                ips=_tuple_values(item.get("Ip") or item.get("IP")),
+                processes=_tuple_values(item.get("Process")),
+            )
+        )
+    return {key: tuple(value) for key, value in result.items()}
+
+
 def update_active_v2rayn_route(
     app_root: Path,
     rules: Iterable[RoutingRule],
@@ -145,6 +178,12 @@ def _v2rayn_display_domain(value: str) -> str:
     if lowered.startswith(("domain:", "full:")):
         return text.split(":", 1)[1].strip()
     return text
+
+
+def _tuple_values(value: object) -> tuple[str, ...]:
+    if isinstance(value, list):
+        return tuple(str(item) for item in value if str(item))
+    return (str(value),) if value else ()
 
 
 def _write_route_backup(path: Path, row: sqlite3.Row, rule_set: str) -> None:

@@ -18,12 +18,21 @@ from tun_bridge import __version__
 from tun_bridge.resources import resource_root
 from tun_gui.monitor import (
     ConnectionAccumulator,
+    TrafficSnapshot,
     fetch_connections,
     format_connection_rate,
     format_rate,
 )
-from tun_controller.rule_importer import format_for_v2rayn_rules, parse_switchyomega_rules
-from tun_controller.v2rayn_route_writer import update_active_v2rayn_route
+from tun_controller.rule_importer import (
+    format_managed_rule_lines,
+    merge_routing_rules,
+    parse_managed_rule_lines,
+    parse_switchyomega_rules,
+)
+from tun_controller.v2rayn_route_writer import (
+    load_managed_v2rayn_rules,
+    update_active_v2rayn_route,
+)
 from tun_controller.v2rayn_source import DEFAULT_APP_ROOT, list_v2rayn_profiles
 
 PROJECT_ROOT = resource_root()
@@ -186,6 +195,7 @@ class TunGuiApp:
         self.direct_speed_var = StringVar(value="↑ 0 B/s    ↓ 0 B/s")
         self.monitor_status_var = StringVar(value="等待 Mihomo 启动")
         self.proxy_info_var = StringVar(value="尚未读取到当前代理")
+        self.snapshot_status_var = StringVar(value="尚未开始快照")
 
         self._profiles: list[str] = []
         self._profile_lookup: dict[str, str] = {}
@@ -194,6 +204,7 @@ class TunGuiApp:
         self._busy = False
         self._monitor_stop = threading.Event()
         self._connection_accumulator = ConnectionAccumulator()
+        self._traffic_snapshot = TrafficSnapshot()
 
         self._build_ui()
         self._append_persisted_failure()
@@ -248,10 +259,13 @@ class TunGuiApp:
         monitor_tab = ttk.Frame(tabs, padding=(0, 8, 0, 0))
         health_tab = ttk.Frame(tabs, padding=(0, 8, 0, 0))
         log_tab = ttk.Frame(tabs, padding=(0, 8, 0, 0))
+        snapshot_tab = ttk.Frame(tabs, padding=(0, 8, 0, 0))
         tabs.add(monitor_tab, text="实时监控")
+        tabs.add(snapshot_tab, text="流量快照")
         tabs.add(health_tab, text="连通检测")
         tabs.add(log_tab, text="运行日志")
         self._build_monitor_section(monitor_tab)
+        self._build_snapshot_section(snapshot_tab)
         self._build_health_section(health_tab)
         self._build_log_section(log_tab)
 
@@ -296,7 +310,7 @@ class TunGuiApp:
         tools_row.pack(fill="x", pady=(8, 0))
         ttk.Button(
             tools_row,
-            text="SwitchyOmega 条件转 v2rayN 路由",
+            text="Bridge 路由管理",
             command=self._open_switchyomega_tool,
         ).pack(side="left")
 
@@ -410,6 +424,32 @@ class TunGuiApp:
             table.column(key, width=widths[key], anchor="w")
         table.pack(fill="both", expand=True)
         return table
+
+    def _build_snapshot_section(self, parent: ttk.Frame) -> None:
+        frame = ttk.LabelFrame(parent, text="诊断时间段内的全部连接目标", padding=12)
+        frame.pack(fill="both", expand=True)
+        controls = ttk.Frame(frame)
+        controls.pack(fill="x", pady=(0, 8))
+        ttk.Button(controls, text="开始快照", command=self._start_traffic_snapshot).pack(side="left")
+        ttk.Button(controls, text="停止快照", command=self._stop_traffic_snapshot).pack(side="left", padx=(8, 0))
+        ttk.Button(controls, text="复制结果", command=self._copy_traffic_snapshot).pack(side="left", padx=(8, 0))
+        ttk.Button(controls, text="清空", command=self._clear_traffic_snapshot).pack(side="left", padx=(8, 0))
+        ttk.Label(controls, textvariable=self.snapshot_status_var, style="Status.TLabel").pack(side="left", padx=(16, 0))
+
+        columns = ("first", "last", "target", "ip", "source", "route", "process", "connections")
+        self.snapshot_table = ttk.Treeview(frame, columns=columns, show="headings", height=16)
+        headings = {
+            "first": "首次", "last": "最后", "target": "目标地址", "ip": "目标 IP", "source": "入口",
+            "route": "出口", "process": "进程", "connections": "连接数",
+        }
+        widths = {"first": 65, "last": 65, "target": 230, "ip": 125, "source": 65, "route": 60, "process": 120, "connections": 60}
+        for key in columns:
+            self.snapshot_table.heading(key, text=headings[key])
+            self.snapshot_table.column(key, width=widths[key], anchor="w")
+        scrollbar = ttk.Scrollbar(frame, orient="vertical", command=self.snapshot_table.yview)
+        self.snapshot_table.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        self.snapshot_table.pack(fill="both", expand=True)
 
     def _build_log_section(self, parent: ttk.Frame) -> None:
         frame = ttk.LabelFrame(parent, text="最近日志", padding=12)
@@ -565,71 +605,89 @@ class TunGuiApp:
         from tkinter import Toplevel
 
         window = Toplevel(self.root)
-        window.title("SwitchyOmega 条件转换")
-        window.geometry("880x560")
+        window.title("Bridge 路由管理")
+        window.geometry("980x720")
         window.transient(self.root)
 
-        input_frame = ttk.Frame(window)
-        input_frame.pack(fill="both", expand=True, padx=10, pady=8)
-        ttk.Label(input_frame, text="1. 粘贴 SwitchyOmega 条件文本：").pack(anchor="w")
-        input_box = Text(input_frame, height=12, width=100, bg="#0b1420", fg="#dce7ff")
+        managed_frame = ttk.LabelFrame(window, text="1) 当前由 Bridge 管理的规则（可删改、可复制）", padding=10)
+        managed_frame.pack(fill="both", expand=True, padx=10, pady=(10, 5))
+        proxy_side = ttk.Frame(managed_frame)
+        direct_side = ttk.Frame(managed_frame)
+        proxy_side.pack(side="left", fill="both", expand=True, padx=(0, 5))
+        direct_side.pack(side="left", fill="both", expand=True, padx=(5, 0))
+        ttk.Label(proxy_side, text="Proxy").pack(anchor="w")
+        proxy_box = Text(proxy_side, height=12, bg="#0b1420", fg="#dce7ff")
+        proxy_box.pack(fill="both", expand=True)
+        ttk.Label(direct_side, text="Direct").pack(anchor="w")
+        direct_box = Text(direct_side, height=12, bg="#0b1420", fg="#dce7ff")
+        direct_box.pack(fill="both", expand=True)
+
+        new_frame = ttk.LabelFrame(window, text="2) 新的 SwitchyOmega 条件", padding=10)
+        new_frame.pack(fill="both", expand=True, padx=10, pady=5)
+        input_box = Text(new_frame, height=9, bg="#0b1420", fg="#dce7ff")
         input_box.pack(fill="both", expand=True)
 
-        output_frame = ttk.Frame(window)
-        output_frame.pack(fill="both", expand=True, padx=10, pady=8)
-        ttk.Label(
-            output_frame,
-            text="2. 可粘贴到 v2rayN 的规则（代理在前，直连在后）：",
-        ).pack(anchor="w")
-        output_box = Text(output_frame, height=16, width=100, bg="#081117", fg="#c9ffb8")
-        output_box.pack(fill="both", expand=True)
+        preview_frame = ttk.LabelFrame(window, text="3) 合并预览", padding=10)
+        preview_frame.pack(fill="both", expand=True, padx=10, pady=(5, 10))
+        preview_box = Text(preview_frame, height=10, bg="#081117", fg="#c9ffb8")
+        preview_box.pack(fill="both", expand=True)
 
-        def convert() -> None:
+        def copy_widget(widget: Text) -> None:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(widget.get("1.0", "end").strip())
+
+        def load_current() -> None:
             try:
-                parsed = parse_switchyomega_rules(input_box.get("1.0", "end"))
-                result = "\n".join(format_for_v2rayn_rules(parsed.rules))
-                if parsed.skipped:
-                    result += "\n" + "\n".join(f"# skipped: {item}" for item in parsed.skipped)
-                output_box.delete("1.0", "end")
-                output_box.insert("1.0", result or "# 无可转换规则")
+                managed = load_managed_v2rayn_rules(Path(self.app_root_var.get().strip()))
+                for widget, key in ((proxy_box, "proxy"), (direct_box, "direct")):
+                    widget.delete("1.0", "end")
+                    widget.insert("1.0", format_managed_rule_lines(managed[key]))
                 self._append_log(
-                    f"规则转换完成：{len(parsed.rules)} 条，跳过 {len(parsed.skipped)} 行"
+                    f"已读取 Bridge 管理规则：Proxy {len(managed['proxy'])} 组，Direct {len(managed['direct'])} 组"
                 )
             except Exception as exc:
-                output_box.delete("1.0", "end")
-                output_box.insert("1.0", f"# 转换失败：{exc}")
-                self._append_log(f"规则转换失败：{exc}")
+                messagebox.showwarning("读取失败", str(exc))
 
-        def paste_and_convert() -> None:
+        def merged_rules() -> tuple[Any, ...]:
+            existing_proxy = parse_managed_rule_lines(proxy_box.get("1.0", "end"), "proxy")
+            existing_direct = parse_managed_rule_lines(direct_box.get("1.0", "end"), "direct")
+            imported = parse_switchyomega_rules(input_box.get("1.0", "end"))
+            return merge_routing_rules(existing_proxy, existing_direct, imported.rules)
+
+        def preview() -> None:
+            rules = merged_rules()
+            proxy = [rule for rule in rules if rule.outbound_tag.lower() == "proxy"]
+            direct = [rule for rule in rules if rule.outbound_tag.lower() == "direct"]
+            text = "# PROXY\n" + format_managed_rule_lines(proxy)
+            text += "\n\n# DIRECT\n" + format_managed_rule_lines(direct)
+            preview_box.delete("1.0", "end")
+            preview_box.insert("1.0", text)
+
+        def paste_new() -> None:
             try:
                 input_box.delete("1.0", "end")
                 input_box.insert("1.0", self.root.clipboard_get())
-                convert()
+                preview()
             except Exception:
                 messagebox.showwarning("提示", "剪贴板中没有可用文本")
 
-        def copy_result() -> None:
-            self.root.clipboard_clear()
-            self.root.clipboard_append(output_box.get("1.0", "end").strip())
-
         def apply_and_restart() -> None:
-            raw = input_box.get("1.0", "end")
-            parsed = parse_switchyomega_rules(raw)
-            if not parsed.rules:
-                messagebox.showwarning("提示", "没有可写入的规则")
+            rules = merged_rules()
+            if not rules:
+                messagebox.showwarning("提示", "合并结果为空；如需清空请至少保留一条后再操作")
                 return
-            self._begin_route_update(parsed.rules)
+            preview()
+            self._begin_route_update(rules)
 
-        button_row = ttk.Frame(output_frame)
-        button_row.pack(fill="x", pady=(8, 0))
-        ttk.Button(button_row, text="粘贴并转换", command=paste_and_convert).pack(side="left")
-        ttk.Button(button_row, text="开始转换", command=convert).pack(side="left", padx=(8, 0))
-        ttk.Button(button_row, text="复制结果", command=copy_result).pack(side="left", padx=(8, 0))
-        ttk.Button(
-            button_row,
-            text="写入激活路由并重启 Bridge",
-            command=apply_and_restart,
-        ).pack(side="left", padx=(8, 0))
+        buttons = ttk.Frame(preview_frame)
+        buttons.pack(fill="x", pady=(8, 0))
+        ttk.Button(buttons, text="重新读取现有规则", command=load_current).pack(side="left")
+        ttk.Button(buttons, text="复制 Proxy", command=lambda: copy_widget(proxy_box)).pack(side="left", padx=(8, 0))
+        ttk.Button(buttons, text="复制 Direct", command=lambda: copy_widget(direct_box)).pack(side="left", padx=(8, 0))
+        ttk.Button(buttons, text="粘贴新条件", command=paste_new).pack(side="left", padx=(8, 0))
+        ttk.Button(buttons, text="合并预览", command=preview).pack(side="left", padx=(8, 0))
+        ttk.Button(buttons, text="整体替换并重启", command=apply_and_restart).pack(side="right")
+        load_current()
 
     def _begin_route_update(self, rules: tuple[Any, ...]) -> None:
         if self._busy:
@@ -721,6 +779,9 @@ class TunGuiApp:
             self._monitor_stop.wait(1.0)
 
     def _render_monitor(self, snapshot: dict[str, Any]) -> None:
+        self._traffic_snapshot.update(snapshot.get("active_connections", []))
+        if self._traffic_snapshot.active:
+            self._render_traffic_snapshot()
         rates = snapshot.get("rates", {})
         proxy = rates.get("proxy", {})
         direct = rates.get("direct", {})
@@ -741,6 +802,52 @@ class TunGuiApp:
         self._render_connection_table(
             self.proxy_connections_table, snapshot.get("proxy_connections", [])
         )
+
+    def _start_traffic_snapshot(self) -> None:
+        self._traffic_snapshot.start()
+        self.snapshot_status_var.set(f"记录中 · 开始 {self._traffic_snapshot.started_at}")
+        self._render_traffic_snapshot()
+        self._append_log("流量快照已开始；请立即复现需要诊断的访问")
+
+    def _stop_traffic_snapshot(self) -> None:
+        if not self._traffic_snapshot.active:
+            return
+        self._traffic_snapshot.stop()
+        count = len(self._traffic_snapshot.rows())
+        self.snapshot_status_var.set(
+            f"已停止 · {self._traffic_snapshot.started_at}–{self._traffic_snapshot.stopped_at} · {count} 个目标"
+        )
+        self._render_traffic_snapshot()
+        self._append_log(f"流量快照已停止，共记录 {count} 个目标")
+
+    def _clear_traffic_snapshot(self) -> None:
+        self._traffic_snapshot.start()
+        self._traffic_snapshot.stop()
+        self.snapshot_status_var.set("尚未开始快照")
+        self._render_traffic_snapshot()
+
+    def _copy_traffic_snapshot(self) -> None:
+        text = self._traffic_snapshot.export_tsv()
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
+        self._append_log(f"已复制流量快照：{len(self._traffic_snapshot.rows())} 个目标")
+
+    def _render_traffic_snapshot(self) -> None:
+        for item_id in self.snapshot_table.get_children():
+            self.snapshot_table.delete(item_id)
+        for item in self._traffic_snapshot.rows():
+            source = {"tun": "TUN", "mixed": "1081", "unknown": "未知"}.get(
+                str(item["source"]), "未知"
+            )
+            route = "直连" if item["route"] == "direct" else "代理"
+            self.snapshot_table.insert(
+                "",
+                "end",
+                values=(
+                    item["first"], item["last"], item["target"], item["destination_ip"], source,
+                    route, item["process"], item["connections"],
+                ),
+            )
 
     @staticmethod
     def _render_connection_table(table: ttk.Treeview, items: Any) -> None:

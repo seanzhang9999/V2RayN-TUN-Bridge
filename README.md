@@ -21,6 +21,8 @@ the actual TUN path.
 - Detects physical-interface changes and safely rebuilds the route.
 - Website checks for Google, ChatGPT, and Baidu are diagnostics only.
 - Writes SwitchyOmega conditions into v2rayN's active route after a credential-free route backup, then restarts Bridge to load the grouped proxy/direct rules.
+- Lists Bridge-managed Proxy and Direct entries for copy/edit, merge, deduplication, and replacement.
+- Captures an in-memory traffic window with every observed hostname, IP, inbound, route, process, and connection count.
 - Portable Windows build: no Python installation required.
 
 ## Download and run

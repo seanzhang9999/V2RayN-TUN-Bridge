@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import ipaddress
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Iterable
 
 from tun_controller.models import RoutingRule
@@ -55,7 +55,7 @@ def parse_switchyomega_rules(raw: str) -> ImportResult:
 def _normalize_entry(line: str) -> tuple[str, str] | None:
     if "," in line:
         return None
-    if line.startswith(("domain:", "full:", "ip:")):
+    if line.startswith(("domain:", "full:", "ip:", "process:")):
         prefix, value = line.split(":", 1)
         return (prefix, value.strip()) if value.strip() else None
     try:
@@ -85,3 +85,50 @@ def format_for_v2rayn_rules(rules: Iterable[RoutingRule]) -> tuple[str, ...]:
         output.extend(f"IP-CIDR,{value},no-resolve,{target}" for value in rule.ips if value)
         output.extend(f"PROCESS-NAME,{value},{target}" for value in rule.processes if value)
     return tuple(proxy_lines + direct_lines)
+
+
+def parse_managed_rule_lines(raw: str, outbound: str) -> tuple[RoutingRule, ...]:
+    """Parse an editable managed list while forcing its selected route."""
+    result = parse_switchyomega_rules(raw)
+    return tuple(replace(rule, outbound_tag=outbound) for rule in result.rules)
+
+
+def merge_routing_rules(*groups: Iterable[RoutingRule]) -> tuple[RoutingRule, ...]:
+    """Merge rule inputs without repeating the same match and outbound."""
+    result: list[RoutingRule] = []
+    seen: set[tuple[object, ...]] = set()
+    for group in groups:
+        for rule in group:
+            key = (
+                rule.outbound_tag.lower(),
+                tuple(_canonical_domain(value) for value in rule.domains),
+                rule.ips,
+                rule.processes,
+                rule.port,
+                rule.network,
+            )
+            if key not in seen:
+                seen.add(key)
+                result.append(rule)
+    return tuple(result)
+
+
+def _canonical_domain(value: str) -> str:
+    text = value.strip().rstrip(",").strip()
+    if text.lower().startswith(("domain:", "full:")):
+        text = text.split(":", 1)[1]
+    return text.lstrip("*+").lstrip(".").casefold()
+
+
+def format_managed_rule_lines(rules: Iterable[RoutingRule]) -> str:
+    """Render managed values in the same plain style shown by v2rayN."""
+    values: list[str] = []
+    for rule in rules:
+        for domain in rule.domains:
+            lowered = domain.lower()
+            if lowered.startswith(("domain:", "full:")):
+                domain = domain.split(":", 1)[1]
+            values.append(domain)
+        values.extend(rule.ips)
+        values.extend(f"process:{process}" for process in rule.processes)
+    return "\n".join(dict.fromkeys(value for value in values if value))

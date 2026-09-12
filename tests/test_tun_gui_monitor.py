@@ -11,11 +11,39 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from tun_gui.monitor import (
     ConnectionAccumulator,
+    TrafficSnapshot,
     fetch_connections,
     format_connection_rate,
     format_rate,
     format_transfer,
 )
+
+
+class TrafficSnapshotTests(unittest.TestCase):
+    def test_collects_all_unique_connections_and_exports_tsv(self):
+        accumulator = ConnectionAccumulator()
+        capture = TrafficSnapshot()
+        capture.start()
+        first = accumulator.update(
+            {"connections": [connection("a", host="zhihu.com", chain="proxy-node", upload=1, download=2)]},
+            sampled_at=1.0,
+        )
+        capture.update(first["active_connections"])
+        second = accumulator.update(
+            {"connections": [
+                connection("a", host="zhihu.com", chain="proxy-node", upload=2, download=4),
+                connection("b", host="zhihu.com", chain="proxy-node", upload=1, download=1),
+                connection("c", host="zhimg.com", chain="DIRECT-BOUND", upload=1, download=1),
+            ]},
+            sampled_at=2.0,
+        )
+        capture.update(second["active_connections"])
+        capture.stop()
+        rows = capture.rows()
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(next(row for row in rows if "zhihu.com" in row["target"])["connections"], 2)
+        self.assertIn("zhimg.com", capture.export_tsv())
+        self.assertIn("direct", capture.export_tsv())
 
 
 def connection(

@@ -64,6 +64,7 @@ class ConnectionAccumulator:
         applications: dict[str, dict[str, Any]] = {}
         current: dict[str, tuple[int, int]] = {}
         active_ids: set[str] = set()
+        active_views: list[dict[str, Any]] = []
 
         connections = payload.get("connections", [])
         if not isinstance(connections, list):
@@ -89,6 +90,7 @@ class ConnectionAccumulator:
             totals[route]["down"] += down_rate
 
             item = _connection_view(raw, route=route)
+            item["connection_id"] = connection_id
             item["up_rate"] = up_rate
             item["down_rate"] = down_rate
             app_key = str(item["process"]).casefold()
@@ -116,6 +118,7 @@ class ConnectionAccumulator:
                 item["sequence"] = self._sequence
             item["active"] = True
             self._recent[connection_id] = item
+            active_views.append(dict(item))
 
         for connection_id, item in self._recent.items():
             if connection_id not in active_ids:
@@ -167,7 +170,80 @@ class ConnectionAccumulator:
             "unknown_source_count": sum(
                 1 for item in all_recent if item["source"] == "unknown"
             ),
+            "active_connections": active_views,
         }
+
+
+class TrafficSnapshot:
+    """Accumulate every connection target observed inside a user time window."""
+
+    def __init__(self) -> None:
+        self.active = False
+        self.started_at = ""
+        self.stopped_at = ""
+        self._rows: "OrderedDict[tuple[str, str, str, str, str], dict[str, Any]]" = OrderedDict()
+        self._seen_ids: set[str] = set()
+
+    def start(self) -> None:
+        self.active = True
+        self.started_at = time.strftime("%H:%M:%S")
+        self.stopped_at = ""
+        self._rows.clear()
+        self._seen_ids.clear()
+
+    def stop(self) -> None:
+        self.active = False
+        self.stopped_at = time.strftime("%H:%M:%S")
+
+    def update(self, items: Any) -> None:
+        if not self.active or not isinstance(items, list):
+            return
+        observed = time.strftime("%H:%M:%S")
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            connection_id = str(item.get("connection_id") or "")
+            key = (
+                str(item.get("target") or "未知目标"),
+                str(item.get("destination_ip") or "—"),
+                str(item.get("source") or "unknown"),
+                str(item.get("route") or "proxy"),
+                str(item.get("process") or "—"),
+            )
+            row = self._rows.setdefault(
+                key,
+                {
+                    "first": observed,
+                    "last": observed,
+                    "target": key[0],
+                    "destination_ip": key[1],
+                    "source": key[2],
+                    "route": key[3],
+                    "process": key[4],
+                    "connections": 0,
+                },
+            )
+            row["last"] = observed
+            if connection_id and connection_id not in self._seen_ids:
+                self._seen_ids.add(connection_id)
+                row["connections"] += 1
+
+    def rows(self) -> list[dict[str, Any]]:
+        return sorted(
+            (dict(item) for item in self._rows.values()),
+            key=lambda item: (str(item["first"]), str(item["target"])),
+        )
+
+    def export_tsv(self) -> str:
+        lines = ["首次\t最后\t目标\t目标IP\t入口\t出口\t进程\t连接数"]
+        for row in self.rows():
+            lines.append(
+                "\t".join(
+                    str(row[key])
+                    for key in ("first", "last", "target", "destination_ip", "source", "route", "process", "connections")
+                )
+            )
+        return "\n".join(lines)
 
 
 def _connection_route(connection: dict[str, Any]) -> str:
@@ -193,6 +269,7 @@ def _connection_view(connection: dict[str, Any], *, route: str) -> dict[str, Any
     return {
         "started": _short_time(start),
         "target": target[:80],
+        "destination_ip": str(metadata.get("destinationIP") or "—")[:64],
         "route": route,
         "process": process[:40],
         "source": _connection_source(metadata),

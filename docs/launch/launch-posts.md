@@ -1,6 +1,6 @@
 # V2RayN TUN Bridge launch kit
 
-Current release: `v0.1.9`
+Current release: `v0.2.0`
 
 - Repository: https://github.com/seanzhang9999/V2RayN-TUN-Bridge
 - Download: https://github.com/seanzhang9999/V2RayN-TUN-Bridge/releases/latest

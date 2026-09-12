@@ -1,7 +1,13 @@
 import unittest
 
 from tun_controller.models import RoutingRule
-from tun_controller.rule_importer import format_for_v2rayn_rules, parse_switchyomega_rules
+from tun_controller.rule_importer import (
+    format_managed_rule_lines,
+    format_for_v2rayn_rules,
+    merge_routing_rules,
+    parse_managed_rule_lines,
+    parse_switchyomega_rules,
+)
 
 
 class RuleImporterTests(unittest.TestCase):
@@ -45,6 +51,14 @@ class RuleImporterTests(unittest.TestCase):
         result = parse_switchyomega_rules("domain:qq.com,domain:baidu.com")
         self.assertEqual(result.rules, ())
         self.assertEqual(len(result.skipped), 1)
+
+    def test_managed_lists_merge_existing_and_new_without_duplicates(self):
+        existing = parse_managed_rule_lines("google.com\nprocess:msedge.exe", "proxy")
+        imported = parse_switchyomega_rules("*.google.com\n!*.zhihu.com").rules
+        merged = merge_routing_rules(existing, imported)
+        self.assertEqual(len(merged), 3)
+        self.assertEqual(merged[1].processes, ("msedge.exe",))
+        self.assertIn("process:msedge.exe", format_managed_rule_lines(merged))
 
 
 if __name__ == "__main__":

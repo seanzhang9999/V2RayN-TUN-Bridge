@@ -5,7 +5,10 @@ import unittest
 from pathlib import Path
 
 from tun_controller.models import RoutingRule
-from tun_controller.v2rayn_route_writer import update_active_v2rayn_route
+from tun_controller.v2rayn_route_writer import (
+    load_managed_v2rayn_rules,
+    update_active_v2rayn_route,
+)
 
 
 class V2rayNRouteWriterTests(unittest.TestCase):
@@ -65,6 +68,16 @@ class V2rayNRouteWriterTests(unittest.TestCase):
         bridge = [item for item in items if str(item.get("Id", "")).startswith("tun-bridge-")]
         self.assertEqual(len(bridge), 1)
         self.assertEqual(bridge[0]["Domain"], ["second.test"])
+
+    def test_lists_only_bridge_managed_proxy_and_direct_content(self):
+        rules = (
+            RoutingRule("p", "proxy", "proxy", domains=("domain:google.com",)),
+            RoutingRule("d", "direct", "direct", domains=("domain:zhihu.com",)),
+        )
+        update_active_v2rayn_route(self.root, rules, backup_root=self.root / "backups")
+        managed = load_managed_v2rayn_rules(self.root)
+        self.assertEqual(managed["proxy"][0].domains, ("google.com",))
+        self.assertEqual(managed["direct"][0].domains, ("zhihu.com",))
 
 
 if __name__ == "__main__":
