@@ -22,6 +22,7 @@ from tun_gui.monitor import (
     format_connection_rate,
     format_rate,
 )
+from tun_controller.rule_importer import format_for_v2rayn_rules, parse_switchyomega_rules
 from tun_controller.v2rayn_source import DEFAULT_APP_ROOT, list_v2rayn_profiles
 
 PROJECT_ROOT = resource_root()
@@ -290,6 +291,14 @@ class TunGuiApp:
         notes_row.pack(fill="x")
         ttk.Label(notes_row, textvariable=self.unsupported_var, foreground="#97d6ff").pack(anchor="w")
 
+        tools_row = ttk.Frame(frame)
+        tools_row.pack(fill="x", pady=(8, 0))
+        ttk.Button(
+            tools_row,
+            text="SwitchyOmega 条件转 v2rayN 路由",
+            command=self._open_switchyomega_tool,
+        ).pack(side="left")
+
     def _build_action_section(self, parent: ttk.Frame) -> None:
         frame = ttk.LabelFrame(parent, text="2) 启动与停止", padding=12)
         frame.pack(fill="x")
@@ -550,6 +559,63 @@ class TunGuiApp:
         self.log_box.insert("end", f"[{time.strftime('%H:%M:%S')}] {message}\n")
         self.log_box.see("end")
         self.log_box.config(state="disabled")
+
+    def _open_switchyomega_tool(self) -> None:
+        from tkinter import Toplevel
+
+        window = Toplevel(self.root)
+        window.title("SwitchyOmega 条件转换")
+        window.geometry("880x560")
+        window.transient(self.root)
+
+        input_frame = ttk.Frame(window)
+        input_frame.pack(fill="both", expand=True, padx=10, pady=8)
+        ttk.Label(input_frame, text="1. 粘贴 SwitchyOmega 条件文本：").pack(anchor="w")
+        input_box = Text(input_frame, height=12, width=100, bg="#0b1420", fg="#dce7ff")
+        input_box.pack(fill="both", expand=True)
+
+        output_frame = ttk.Frame(window)
+        output_frame.pack(fill="both", expand=True, padx=10, pady=8)
+        ttk.Label(
+            output_frame,
+            text="2. 可粘贴到 v2rayN 的规则（代理在前，直连在后）：",
+        ).pack(anchor="w")
+        output_box = Text(output_frame, height=16, width=100, bg="#081117", fg="#c9ffb8")
+        output_box.pack(fill="both", expand=True)
+
+        def convert() -> None:
+            try:
+                parsed = parse_switchyomega_rules(input_box.get("1.0", "end"))
+                result = "\n".join(format_for_v2rayn_rules(parsed.rules))
+                if parsed.skipped:
+                    result += "\n" + "\n".join(f"# skipped: {item}" for item in parsed.skipped)
+                output_box.delete("1.0", "end")
+                output_box.insert("1.0", result or "# 无可转换规则")
+                self._append_log(
+                    f"规则转换完成：{len(parsed.rules)} 条，跳过 {len(parsed.skipped)} 行"
+                )
+            except Exception as exc:
+                output_box.delete("1.0", "end")
+                output_box.insert("1.0", f"# 转换失败：{exc}")
+                self._append_log(f"规则转换失败：{exc}")
+
+        def paste_and_convert() -> None:
+            try:
+                input_box.delete("1.0", "end")
+                input_box.insert("1.0", self.root.clipboard_get())
+                convert()
+            except Exception:
+                messagebox.showwarning("提示", "剪贴板中没有可用文本")
+
+        def copy_result() -> None:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(output_box.get("1.0", "end").strip())
+
+        button_row = ttk.Frame(output_frame)
+        button_row.pack(fill="x", pady=(8, 0))
+        ttk.Button(button_row, text="粘贴并转换", command=paste_and_convert).pack(side="left")
+        ttk.Button(button_row, text="开始转换", command=convert).pack(side="left", padx=(8, 0))
+        ttk.Button(button_row, text="复制结果", command=copy_result).pack(side="left", padx=(8, 0))
 
     def _monitor_loop(self) -> None:
         """Fetch controller data away from Tk's main thread."""

@@ -20,6 +20,7 @@ the actual TUN path.
   views, with destinations, instantaneous speeds, and direct/proxy routing.
 - Detects physical-interface changes and safely rebuilds the route.
 - Website checks for Google, ChatGPT, and Baidu are diagnostics only.
+- Converts SwitchyOmega conditions into pasteable v2rayN rules, grouped by proxy then direct.
 - Portable Windows build: no Python installation required.
 
 ## Download and run
