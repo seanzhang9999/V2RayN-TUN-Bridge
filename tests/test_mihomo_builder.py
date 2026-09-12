@@ -183,6 +183,20 @@ class MihomoBuilderTests(unittest.TestCase):
         self.assertTrue(any(rule.startswith("IP-CIDR,10.0.0.0/8,DIRECT-BOUND") for rule in rules))
         self.assertEqual(rules[-1], "MATCH,PROXY")
 
+    def test_plain_and_wildcard_domains_use_suffix_matching(self):
+        imported = replace(
+            imported_config(),
+            rules=(
+                RoutingRule("plain", "plain", "direct", domains=("linkedin.com",)),
+                RoutingRule("wildcard", "wildcard", "proxy", domains=("*.google.com",)),
+            ),
+        )
+        rules = build_mihomo_config(
+            imported, SIGNATURE, mode="full-ipv4-tun", mixed_port=1081
+        )["rules"]
+        self.assertIn("DOMAIN-SUFFIX,linkedin.com,DIRECT-BOUND", rules)
+        self.assertIn("DOMAIN-SUFFIX,google.com,PROXY", rules)
+
     def test_dns_is_internal_fake_ip_ipv4(self):
         dns = self.build()["dns"]
         self.assertTrue(dns["enable"])

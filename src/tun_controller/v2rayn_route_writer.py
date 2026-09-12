@@ -112,7 +112,12 @@ def _build_managed_rules(rules: tuple[RoutingRule, ...]) -> list[dict[str, objec
         ("direct", "tun-bridge-import-direct", "[TUN Bridge] 导入直连规则"),
     ):
         selected = [rule for rule in rules if rule.outbound_tag.lower() == outbound]
-        domains = [value for rule in selected for value in rule.domains]
+        domains = [
+            _v2rayn_display_domain(value)
+            for rule in selected
+            for value in rule.domains
+            if _v2rayn_display_domain(value)
+        ]
         ips = [value for rule in selected for value in rule.ips]
         processes = [value for rule in selected for value in rule.processes]
         if not domains and not ips and not processes:
@@ -131,6 +136,15 @@ def _build_managed_rules(rules: tuple[RoutingRule, ...]) -> list[dict[str, objec
             item["Process"] = list(dict.fromkeys(processes))
         result.append(item)
     return result
+
+
+def _v2rayn_display_domain(value: str) -> str:
+    """Store ordinary imported hosts the same way v2rayN's editor displays them."""
+    text = value.strip().rstrip(",").strip()
+    lowered = text.lower()
+    if lowered.startswith(("domain:", "full:")):
+        return text.split(":", 1)[1].strip()
+    return text
 
 
 def _write_route_backup(path: Path, row: sqlite3.Row, rule_set: str) -> None:

@@ -19,8 +19,8 @@ from tun_bridge import __version__
 
 class TunGuiCommandTests(unittest.TestCase):
     def test_version_is_visible_in_application_title(self):
-        self.assertEqual(__version__, "0.1.8")
-        self.assertIn("v0.1.8", APP_TITLE)
+        self.assertEqual(__version__, "0.1.9")
+        self.assertIn("v0.1.9", APP_TITLE)
 
     def test_persisted_failure_is_clearly_historical(self):
         message = format_persisted_failure(

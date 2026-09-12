@@ -283,7 +283,11 @@ def _translate_rule(rule: RoutingRule) -> list[str]:
         elif lowered.startswith("regexp:"):
             result.append(f"DOMAIN-REGEX,{value.split(':', 1)[1]},{target}")
         elif value:
-            result.append(f"DOMAIN-KEYWORD,{value},{target}")
+            normalized = value.lstrip("*+").lstrip(".")
+            if "." in normalized and not any(character.isspace() for character in normalized):
+                result.append(f"DOMAIN-SUFFIX,{normalized},{target}")
+            else:
+                result.append(f"DOMAIN-KEYWORD,{value},{target}")
 
     for raw in rule.ips:
         value = raw.strip()

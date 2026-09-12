@@ -50,6 +50,8 @@ class V2rayNRouteWriterTests(unittest.TestCase):
         self.assertEqual(count, 3)
         self.assertEqual(updated[0]["Id"], "tun-bridge-import-proxy")
         self.assertEqual(updated[1]["Id"], "tun-bridge-import-direct")
+        self.assertEqual(updated[0]["Domain"], ["google.com"])
+        self.assertEqual(updated[1]["Domain"], ["zhihu.com"])
         self.assertEqual(updated[2]["Id"], "original")
 
     def test_replaces_previous_bridge_groups_without_duplicates(self):
@@ -62,7 +64,7 @@ class V2rayNRouteWriterTests(unittest.TestCase):
         connection.close()
         bridge = [item for item in items if str(item.get("Id", "")).startswith("tun-bridge-")]
         self.assertEqual(len(bridge), 1)
-        self.assertEqual(bridge[0]["Domain"], ["domain:second.test"])
+        self.assertEqual(bridge[0]["Domain"], ["second.test"])
 
 
 if __name__ == "__main__":
