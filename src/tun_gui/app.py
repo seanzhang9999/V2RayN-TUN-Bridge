@@ -289,7 +289,11 @@ class TunGuiApp:
         )
         self.profile_combo.pack(side="left", padx=(12, 8), fill="x", expand=True)
         self.profile_combo.bind("<<ComboboxSelected>>", self._on_profile_select)
-        ttk.Button(profile_row, text="刷新", command=self.refresh_profiles).pack(side="right")
+        ttk.Button(
+            profile_row,
+            text="刷新并重测",
+            command=self._refresh_profiles_and_retest,
+        ).pack(side="right")
 
         bottom_row = ttk.Frame(frame)
         bottom_row.pack(fill="x", pady=(8, 0))
@@ -350,6 +354,16 @@ class TunGuiApp:
             parent, text="启动后连通检测（仅提示，不影响 TUN 运行）", padding=12
         )
         frame.pack(fill="both", expand=True)
+
+        controls = ttk.Frame(frame)
+        controls.pack(fill="x", pady=(0, 8))
+        self.retest_btn = ttk.Button(controls, text="重测联通", command=self._retest_connectivity)
+        self.retest_btn.pack(side="left")
+        ttk.Label(
+            controls,
+            text="仅更新提示结果，不影响 TUN 运行",
+            style="Status.TLabel",
+        ).pack(side="left", padx=(10, 0))
 
         for key, label, _ in self.CHECKS:
             row = ttk.Frame(frame)
@@ -431,15 +445,6 @@ class TunGuiApp:
         frame = ttk.LabelFrame(parent, text="诊断时间段内的全部连接目标", padding=12)
         frame.pack(fill="both", expand=True)
 
-        controls = ttk.Frame(frame)
-        controls.pack(fill="x", pady=(0, 8))
-        self.retest_btn = ttk.Button(controls, text="重测联通", command=self._retest_connectivity)
-        self.retest_btn.pack(side="left")
-        ttk.Label(
-            controls,
-            text="仅更新提示结果，不影响 TUN 运行",
-            style="Status.TLabel",
-        ).pack(side="left", padx=(10, 0))
         controls = ttk.Frame(frame)
         controls.pack(fill="x", pady=(0, 8))
         ttk.Button(controls, text="开始快照", command=self._start_traffic_snapshot).pack(side="left")
@@ -577,6 +582,12 @@ class TunGuiApp:
             self.unsupported_var.set("")
 
         self._append_health(None)
+
+    def _refresh_profiles_and_retest(self) -> None:
+        if self._busy:
+            return
+        self.refresh_profiles()
+        self._retest_connectivity()
 
     def _get_selected_profile_id(self) -> str:
         display = self.profile_combo.get()

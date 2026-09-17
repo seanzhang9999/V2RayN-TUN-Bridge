@@ -1,4 +1,5 @@
 import sys
+import inspect
 import unittest
 from pathlib import Path
 
@@ -15,14 +16,26 @@ from tun_gui.app import (
     build_control_command,
     format_persisted_failure,
     status_is_live,
+    TunGuiApp,
 )
 from tun_bridge import __version__
 
 
 class TunGuiCommandTests(unittest.TestCase):
     def test_version_is_visible_in_application_title(self):
-        self.assertEqual(__version__, "0.2.3")
-        self.assertIn("v0.2.3", APP_TITLE)
+        self.assertEqual(__version__, "0.2.4")
+        self.assertIn("v0.2.4", APP_TITLE)
+
+    def test_retest_button_belongs_to_connectivity_tab_not_snapshot_tab(self):
+        health_source = inspect.getsource(TunGuiApp._build_health_section)
+        snapshot_source = inspect.getsource(TunGuiApp._build_snapshot_section)
+        self.assertIn('text="重测联通"', health_source)
+        self.assertNotIn('text="重测联通"', snapshot_source)
+
+    def test_profile_refresh_also_triggers_connectivity_retest(self):
+        source = inspect.getsource(TunGuiApp._refresh_profiles_and_retest)
+        self.assertIn("self.refresh_profiles()", source)
+        self.assertIn("self._retest_connectivity()", source)
 
     def test_persisted_failure_is_clearly_historical(self):
         message = format_persisted_failure(
