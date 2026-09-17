@@ -20,6 +20,7 @@ the actual TUN path.
   views, with destinations, instantaneous speeds, and direct/proxy routing.
 - Detects physical-interface changes and safely rebuilds the route.
 - Website checks for Google, ChatGPT, and Baidu are diagnostics only.
+- Restart TUN safely from the GUI, or rerun connectivity diagnostics without changing the current TUN session.
 - Writes SwitchyOmega conditions into v2rayN's active route after a credential-free route backup, then restarts Bridge to load the grouped proxy/direct rules.
 - Lists Bridge-managed Proxy and Direct entries for copy/edit, merge, deduplication, and replacement.
 - Captures an in-memory traffic window with every observed hostname, IP, inbound, route, process, and connection count.

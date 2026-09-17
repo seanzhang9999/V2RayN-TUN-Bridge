@@ -151,7 +151,7 @@ def build_control_command(
         "-AppRoot",
         str(app_root),
     ]
-    if action == "Start":
+    if action in {"Start", "Restart"}:
         args += ["-ProfileId", profile_id]
         if manual_v2rayn:
             args.append("-ManualV2rayN")
@@ -322,7 +322,9 @@ class TunGuiApp:
         self.start_btn = ttk.Button(btn_row, text="启动 TUN", command=self._start_tun)
         self.start_btn.pack(side="left", padx=(0, 10))
         self.stop_btn = ttk.Button(btn_row, text="停止 TUN", command=self._stop_tun)
-        self.stop_btn.pack(side="left")
+        self.stop_btn.pack(side="left", padx=(0, 10))
+        self.restart_btn = ttk.Button(btn_row, text="重启 TUN", command=self._restart_tun)
+        self.restart_btn.pack(side="left")
         ttk.Label(btn_row, textvariable=self.message_var, style="Status.TLabel").pack(
             side="left", padx=(16, 0), anchor="w"
         )
@@ -428,6 +430,16 @@ class TunGuiApp:
     def _build_snapshot_section(self, parent: ttk.Frame) -> None:
         frame = ttk.LabelFrame(parent, text="诊断时间段内的全部连接目标", padding=12)
         frame.pack(fill="both", expand=True)
+
+        controls = ttk.Frame(frame)
+        controls.pack(fill="x", pady=(0, 8))
+        self.retest_btn = ttk.Button(controls, text="重测联通", command=self._retest_connectivity)
+        self.retest_btn.pack(side="left")
+        ttk.Label(
+            controls,
+            text="仅更新提示结果，不影响 TUN 运行",
+            style="Status.TLabel",
+        ).pack(side="left", padx=(10, 0))
         controls = ttk.Frame(frame)
         controls.pack(fill="x", pady=(0, 8))
         ttk.Button(controls, text="开始快照", command=self._start_traffic_snapshot).pack(side="left")
@@ -519,6 +531,8 @@ class TunGuiApp:
         self._busy = busy
         self.start_btn.config(state="disabled" if busy else "normal")
         self.stop_btn.config(state="disabled" if busy else "normal")
+        self.restart_btn.config(state="disabled" if busy else "normal")
+        self.retest_btn.config(state="disabled" if busy else "normal")
         self.profile_combo.config(state="disabled" if busy else "readonly")
 
     def refresh_profiles(self) -> None:
@@ -917,11 +931,11 @@ class TunGuiApp:
     def _begin_command(self, action: str) -> None:
         """Capture UI values on the Tk thread, then start the worker."""
         app_root_text = self.app_root_var.get().strip()
-        if action == "Start" and not app_root_text:
+        if action in {"Start", "Restart"} and not app_root_text:
             messagebox.showwarning("提示", "v2rayN 路径为空")
             return
-        profile_id = self._get_selected_profile_id() if action == "Start" else ""
-        if action == "Start" and not profile_id:
+        profile_id = self._get_selected_profile_id() if action in {"Start", "Restart"} else ""
+        if action in {"Start", "Restart"} and not profile_id:
             messagebox.showwarning("提示", "当前无可启动的可用节点，或未选中任何节点")
             return
         self._save_settings()
@@ -958,6 +972,29 @@ class TunGuiApp:
             return
         self._append_log("开始停止 TUN")
         self._begin_command("Stop")
+
+    def _restart_tun(self) -> None:
+        if self._busy:
+            return
+        self._append_log("开始安全重启 TUN；将重新读取当前节点、路由与网络")
+        self._begin_command("Restart")
+
+    def _retest_connectivity(self) -> None:
+        if self._busy:
+            return
+        self._set_busy(True)
+        self.message_var.set("正在重新检测联通性；结果仅作提示…")
+        self._append_health({key: {"state": "testing"} for key, _, _ in self.CHECKS})
+        self._append_log("开始重新检测系统链路、本地代理与直连网站")
+        fallback_port = 1082 if self.manual_var.get() else 1081
+        mixed_port = _read_local_proxy_port(STATUS_PATH, fallback=fallback_port)
+        threading.Thread(
+            target=self._run_connectivity_retest, args=(mixed_port,), daemon=True
+        ).start()
+
+    def _run_connectivity_retest(self, mixed_port: int) -> None:
+        checks = _collect_connectivity_checks(mixed_port=mixed_port)
+        self._cmd_queue.put(("connectivity-done", checks))
 
     def _poll_status(self) -> None:
         changed, status = self._status_watcher.poll()
@@ -1060,6 +1097,14 @@ class TunGuiApp:
                 self.proxy_speed_var.set("↑ 0 B/s    ↓ 0 B/s")
                 self.direct_speed_var.set("↑ 0 B/s    ↓ 0 B/s")
                 self.monitor_status_var.set("等待 TUN 监控接口")
+            elif kind == "connectivity-done":
+                self._set_busy(False)
+                self._append_health(payload)
+                passed = sum(
+                    1 for check in payload.values() if check.get("state") == "passed"
+                )
+                self.message_var.set(f"联通检测完成：{passed}/{len(self.CHECKS)} 项通过（仅提示）")
+                self._append_log(f"联通检测完成：{passed}/{len(self.CHECKS)} 项通过；不改变 TUN 状态")
             elif kind == "route-update-done":
                 self._set_busy(False)
                 if payload.get("ok"):
@@ -1083,6 +1128,61 @@ class TunGuiApp:
 
     def run(self) -> None:
         self.root.mainloop()
+
+
+def _curl_status(url: str, *, proxy_port: int = 0, timeout: int = 12) -> str:
+    arguments = [
+        "curl.exe", "--ipv4", "--silent", "--output", "NUL",
+        "--write-out", "%{http_code}", "--connect-timeout", "5",
+        "--max-time", str(timeout),
+    ]
+    if proxy_port:
+        arguments += ["--proxy", f"socks5h://127.0.0.1:{proxy_port}"]
+    else:
+        arguments += ["--noproxy", "*"]
+    arguments.append(url)
+    try:
+        completed = subprocess.run(
+            arguments,
+            capture_output=True,
+            text=True,
+            timeout=timeout + 3,
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "000"
+    return completed.stdout.strip() if completed.returncode == 0 else "000"
+
+
+def _read_local_proxy_port(path: Path, *, fallback: int = 1081) -> int:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+        port = int(value.get("localProxyPort") or 0)
+    except (OSError, json.JSONDecodeError, TypeError, ValueError, AttributeError):
+        return fallback
+    return port if 1 <= port <= 65535 else fallback
+
+
+def _collect_connectivity_checks(
+    *, mixed_port: int = 1081, curl_status: Any = _curl_status
+) -> dict[str, dict[str, str]]:
+    web_statuses = {str(code) for code in range(200, 500)}
+    definitions = (
+        ("google", "https://www.google.com/generate_204", 0, {"204"}),
+        ("chatgpt", "https://chatgpt.com/", 0, web_statuses),
+        ("mihomo-google", "https://www.google.com/generate_204", mixed_port, {"204"}),
+        ("mihomo-chatgpt", "https://chatgpt.com/", mixed_port, web_statuses),
+        ("direct-baidu", "https://www.baidu.com/", mixed_port, {"200"}),
+    )
+    results: dict[str, dict[str, str]] = {}
+    for name, url, proxy_port, accepted in definitions:
+        status = str(curl_status(url, proxy_port=proxy_port))
+        results[name] = {
+            "state": "passed" if status in accepted else "failed",
+            "httpStatus": status,
+        }
+    return results
 
 
 def _pretty_state(state: str) -> str:

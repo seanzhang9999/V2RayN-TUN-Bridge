@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
-    [ValidateSet('Start', 'Stop', 'Status')]
+    [ValidateSet('Start', 'Stop', 'Restart', 'Status')]
     [string]$Action,
     [ValidatePattern('^[A-Za-z0-9._-]{1,128}$')]
     [string]$ProfileId,
@@ -102,6 +102,21 @@ if ($Action -eq 'Status') {
 }
 
 Protect-RuntimeRoot
+
+if ($Action -eq 'Restart') {
+    & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File $PSCommandPath -Action Stop -AppRoot $AppRoot -Elevated
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $restartArguments = @(
+        '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+        '-WindowStyle', 'Hidden', '-File', ('"{0}"' -f $PSCommandPath),
+        '-Action', 'Start', '-AppRoot', ('"{0}"' -f $AppRoot), '-Elevated'
+    )
+    if ($ManualV2rayN) { $restartArguments += '-ManualV2rayN' }
+    if ($ProfileId) { $restartArguments += @('-ProfileId', ('"{0}"' -f $ProfileId)) }
+    if ($AppExecutable) { $restartArguments += @('-AppExecutable', ('"{0}"' -f $AppExecutable)) }
+    $restart = Start-Process -FilePath 'powershell.exe' -ArgumentList $restartArguments -WindowStyle Hidden -Wait -PassThru
+    exit $restart.ExitCode
+}
 
 if ($Action -eq 'Start') {
     $AppRoot = (Resolve-Path -LiteralPath $AppRoot -ErrorAction Stop).Path

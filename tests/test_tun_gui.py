@@ -10,6 +10,8 @@ from tun_gui.app import (
     APP_TITLE,
     CONTROL_SCRIPT,
     StatusFileWatcher,
+    _collect_connectivity_checks,
+    _read_local_proxy_port,
     build_control_command,
     format_persisted_failure,
     status_is_live,
@@ -19,8 +21,8 @@ from tun_bridge import __version__
 
 class TunGuiCommandTests(unittest.TestCase):
     def test_version_is_visible_in_application_title(self):
-        self.assertEqual(__version__, "0.2.2")
-        self.assertIn("v0.2.2", APP_TITLE)
+        self.assertEqual(__version__, "0.2.3")
+        self.assertIn("v0.2.3", APP_TITLE)
 
     def test_persisted_failure_is_clearly_historical(self):
         message = format_persisted_failure(
@@ -66,6 +68,40 @@ class TunGuiCommandTests(unittest.TestCase):
 
         self.assertNotIn("-ProfileId", command)
         self.assertNotIn("-ManualV2rayN", command)
+
+    def test_restart_keeps_start_options_for_one_safe_control_action(self):
+        command = build_control_command(
+            "Restart",
+            Path(r"C:\fixture\v2rayN"),
+            profile_id="profile-123",
+            manual_v2rayn=True,
+        )
+        self.assertEqual(command[command.index("-Action") + 1], "Restart")
+        self.assertEqual(command[command.index("-ProfileId") + 1], "profile-123")
+        self.assertIn("-ManualV2rayN", command)
+
+    def test_manual_connectivity_retest_is_informational_and_uses_1081(self):
+        calls = []
+
+        def fake_curl(url, *, proxy_port=0):
+            calls.append((url, proxy_port))
+            return "204" if "generate_204" in url else "200"
+
+        checks = _collect_connectivity_checks(mixed_port=1082, curl_status=fake_curl)
+        self.assertTrue(all(item["state"] == "passed" for item in checks.values()))
+        self.assertEqual(len(checks), 5)
+        self.assertEqual([port for _, port in calls], [0, 0, 1082, 1082, 1082])
+
+    def test_retest_reads_the_active_mixed_port_with_a_safe_fallback(self):
+        import json
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "status.json"
+            path.write_text(json.dumps({"localProxyPort": 1082}), encoding="utf-8")
+            self.assertEqual(_read_local_proxy_port(path), 1082)
+            path.write_text("not-json", encoding="utf-8")
+            self.assertEqual(_read_local_proxy_port(path, fallback=1081), 1081)
 
     def test_status_watcher_emits_only_when_file_changes(self):
         import json
