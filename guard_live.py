@@ -1,9 +1,12 @@
 """Persistent WFP guard. Only objects in our dedicated sublayer are managed."""
 import contextlib
 import ctypes as c
+import functools
 import json
 import os
 import runpy
+import socket
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -112,8 +115,61 @@ def replace_tun_filters(handle, previous, luid):
         sub.key = key
         return add_tun_filters(handle, sub, luid)
 
+@functools.lru_cache(maxsize=1)
+def physical_luids(interface_list):
+    # The list of local interfaces is the cache key. An SSID change on the
+    # same adapter needs no update. Discovery must also work before DHCP.
+    ps = Path(os.environ['SystemRoot']) / 'System32/WindowsPowerShell/v1.0/powershell.exe'
+    indices = subprocess.check_output(
+        [str(ps), '-NoProfile', '-NonInteractive', '-Command',
+         "$ErrorActionPreference='Stop'; (Get-NetAdapter -Physical).ifIndex"],
+        timeout=10, creationflags=subprocess.CREATE_NO_WINDOW)
+    values = []
+    for index in indices.split():
+        luid = c.c_uint64()
+        if c.windll.iphlpapi.ConvertInterfaceIndexToLuid(int(index), c.byref(luid)) == 0:
+            values.append(luid.value)
+    return tuple(sorted(values))
 
-def install(handle, core, addresses, transport, networks, luid, refresh=False):
+
+def add_dhcp_filters(handle, sub, interfaces):
+    if not interfaces:
+        return
+    app, descriptor = ptr(), ptr()
+    size = c.c_uint32()
+    # NT SERVICE\Dhcp. Grant only FWP_ACTRL_MATCH_FILTER to its service token.
+    sid = 'S-1-5-80-2940520708-3855866260-481812779-327648279-1710889582'
+    sddl = c.c_wchar_p(f'O:SYG:SYD:(A;;0x1;;;{sid})')
+    if not c.windll.advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl, 1, c.byref(descriptor), c.byref(size)):
+        raise c.WinError()
+    try:
+        image = Path(os.environ['SystemRoot']) / 'System32/svchost.exe'
+        call('FwpmGetAppIdFromFileName0', c.c_wchar_p(str(image)), c.byref(app))
+        blob = g['Blob'](size.value, descriptor.value)
+        def number(key, kind, value):
+            return g['Condition'](g['guid'](key), 0, g['Value'](kind, g['Data'](number=value)))
+        def pointer(key, kind, value):
+            return g['Condition'](g['guid'](key), 0, g['Value'](kind, g['Data'](pointer=value)))
+        for layer, client, server in zip(g['LAYERS'], (68, 546), (67, 547)):
+            for interface in interfaces:
+                luid = c.c_uint64(interface)
+                conditions = [
+                    pointer(g['APP'], 12, app.value),
+                    pointer('af043a0a-b34d-4f86-979c-c90371af6e66', 14, c.addressof(blob)),
+                    pointer('4cd62a49-59c3-4969-b7f3-bda5d32890a4', 4, c.addressof(luid)),
+                    number('3971ef2b-623e-4f9a-8cb1-6e79b806b9a7', 1, 17),
+                    number('0c1ba1af-5765-453f-af22-a8f791ac775b', 2, client),
+                    number('c35a604d-d22b-4e1a-91b4-68f674ee674b', 2, server),
+                ]
+                g['add_filter'](handle, sub, layer, 'Windows DHCP client', g['PERMIT'], 13, conditions)
+    finally:
+        if app:
+            api.FwpmFreeMemory0(c.byref(app))
+        c.windll.kernel32.LocalFree(descriptor)
+
+
+def install(handle, core, addresses, transport, networks, luid, refresh=False, dhcp_interfaces=()):
     app = ptr()
     if addresses or networks:
         call('FwpmGetAppIdFromFileName0', c.c_wchar_p(str(core)), c.byref(app))
@@ -134,6 +190,7 @@ def install(handle, core, addresses, transport, networks, luid, refresh=False):
                 add('loopback', g['PERMIT'],14,[g['Condition'](g['guid'](g['FLAGS']),6,g['Value'](3,g['Data'](number=1)))])
                 add('physical egress',g['BLOCK'],1,[])
             tun_filters = add_tun_filters(handle, sub, luid)
+            add_dhcp_filters(handle, sub, dhcp_interfaces)
             for ip in addresses:
                 g['permit_endpoint'](handle, sub, app, ip, transport)
             for network in networks:
@@ -220,7 +277,8 @@ def activate(handle):
                 addresses=[]
             next_identity_check=0
             interface=tun_luid()
-            tun_filters = install(handle,core,addresses,transport,networks,interface)
+            dhcp_interfaces = physical_luids(tuple(socket.if_nameindex()))
+            tun_filters = install(handle,core,addresses,transport,networks,interface,dhcp_interfaces=dhcp_interfaces)
             report('保护已开启 · IPv4 / IPv6')
             record_status(True, host, transport, addresses, interface)
             acknowledge()
@@ -252,12 +310,17 @@ def activate(handle):
             except (OSError, ValueError, RuntimeError, KeyError, TypeError):
                 updated_core,new_host,new_addresses,new_networks,new_transport=None,'',[],set(),transport
             new_interface=tun_luid()
-            if (updated_core,new_host,new_transport,new_networks,new_addresses) != (core,host,transport,networks,addresses):
+            try:
+                new_dhcp = physical_luids(tuple(socket.if_nameindex()))
+            except (OSError, ValueError, subprocess.SubprocessError):
+                new_dhcp = dhcp_interfaces
+            if (updated_core,new_host,new_transport,new_networks,new_addresses,new_dhcp) != (core,host,transport,networks,addresses,dhcp_interfaces):
                 # Stop wins if the off transaction has already removed the sublayer.
-                tun_filters = install(handle,updated_core,new_addresses,new_transport,new_networks,new_interface,refresh=True)
+                tun_filters = install(handle,updated_core,new_addresses,new_transport,new_networks,new_interface,refresh=True,dhcp_interfaces=new_dhcp)
                 if tun_filters is None:
                     return
                 core=updated_core
+                dhcp_interfaces=new_dhcp
                 host,transport,networks,interface,addresses=new_host,new_transport,new_networks,new_interface,new_addresses
                 record_status(True, host, transport, addresses, interface)
                 report('保护已开启 · 放行规则已同步' if addresses else '保护已开启 · 待确认节点，物理公网默认阻断')

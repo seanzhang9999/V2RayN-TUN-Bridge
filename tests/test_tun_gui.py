@@ -23,8 +23,8 @@ from tun_bridge import __version__
 
 class TunGuiCommandTests(unittest.TestCase):
     def test_version_is_visible_in_application_title(self):
-        self.assertEqual(__version__, "0.3.4-rc.1")
-        self.assertIn("v0.3.4-rc.1", APP_TITLE)
+        self.assertEqual(__version__, "0.3.4-rc.2")
+        self.assertIn("v0.3.4-rc.2", APP_TITLE)
 
     def test_retest_button_belongs_to_connectivity_tab_not_snapshot_tab(self):
         health_source = inspect.getsource(TunGuiApp._build_health_section)

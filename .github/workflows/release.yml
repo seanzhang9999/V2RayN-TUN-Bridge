@@ -27,10 +27,10 @@ jobs:
       - name: Package and verify the guard console
         run: python packaging/guard_release.py
       - uses: softprops/action-gh-release@v2
-        if: github.ref == 'refs/tags/v0.3.4-rc.1'
+        if: github.ref == 'refs/tags/v0.3.4-rc.2'
         with:
           prerelease: true
-          body_path: docs/release-v0.3.4-rc.1.md
+          body_path: docs/release-v0.3.4-rc.2.md
           fail_on_unmatched_files: true
           files: |
             dist/V2RayN-TUN-Bridge-*-windows-x64.zip

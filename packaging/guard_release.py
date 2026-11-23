@@ -17,7 +17,8 @@ RUNTIME = {
 FILES = ("guard-console.pyw", "guard_live.py", "local_access.py", "local_panel.py",
          "tun_activity.py", "xray_direct.py", "outbound-guard-trial.py", "tun-acceptance.py",
          "mihomo-tun.ps1", "tun-watchdog.ps1", "cleanup-tun.ps1", "PortalRelay.cs",
-         "LICENSE", "README.md", "README.zh-CN.md", "THIRD_PARTY_NOTICES.md")
+         "LICENSE", "README.md", "README.zh-CN.md", "THIRD_PARTY_NOTICES.md",
+         "docs/release-v0.3.4-rc.2.md")
 
 
 def recover_runtime(archive):
@@ -39,7 +40,7 @@ def build():
     csc = Path(os.environ["WINDIR"]) / "Microsoft.NET/Framework64/v4.0.30319/csc.exe"
     subprocess.run([str(csc), "/nologo", "/target:winexe", "/platform:x64",
                     "/out:" + str(relay), str(ROOT / "PortalRelay.cs")], check=True)
-    bundle = dist / "V2RayN-TUN-Bridge-v0.3.4-rc.1-windows-x64.zip"
+    bundle = dist / "V2RayN-TUN-Bridge-v0.3.4-rc.2-windows-x64.zip"
     with zipfile.ZipFile(bundle, "w", zipfile.ZIP_DEFLATED) as zipped:
         for name in FILES:
             zipped.write(ROOT / name, name)

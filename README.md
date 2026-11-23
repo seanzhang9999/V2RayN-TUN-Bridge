@@ -10,6 +10,7 @@ Windows x64 console for an IPv4 Mihomo TUN and independent Windows Filtering Pla
 | System proxy clients | Directly to v2rayN on 1081 |
 | Explicit Mihomo proxy clients | Mihomo mixed listener on 127.0.0.1:1082 → v2rayN on 1081 |
 | Xray socket captured again by TUN | Exact executable-path match → authenticated loopback VLESS listener → auxiliary Xray freedom outbound bound to the physical interface → WFP |
+| Windows DHCP client | Physical adapter → DHCP server using UDP 68 to 67 (IPv4) or 546 to 547 (IPv6). WFP checks the service token and executable path. |
 | Captive portal | Dedicated Edge profile → PortalRelay → approved IP and port on the current physical link |
 
 The VPN endpoint is exempted at the WFP layer for the Xray application, protocol and port. Its entire IP remains eligible for TUN capture, including ordinary SSH to that same host. Pure IP/CIDR direct rules and the China GeoIP set grant physical access only to the identified Xray executable. Domain rules remain part of Xray routing. Unknown apps have no general physical Internet exception. Approved on-link LAN destinations have separate interface-scoped exceptions.
@@ -25,4 +26,4 @@ TUN uses fake-IP DNS and proxied DoH. When the physical egress helper needs a re
 
 ## Verification
 
-Two real OpenSSH servers returned the same negotiated host keys through an isolated TUN as on their baseline paths. The Xray process-path rule and physical relay were also exercised. Existing SSH sessions and the 1081 listener survived the test. Long-duration whole-machine protection, IPv6 end-to-end forwarding and the complete Antigravity login flow remain unverified for this release candidate.
+On a Windows laptop connected to a Wi-Fi hotspot, the DHCP server renewed the lease while WFP and TUN were both active. Two SSH hosts authenticated through the tunnel. An authenticated Codex request also completed. See the [RC2 validation notes](docs/release-v0.3.4-rc.2.md) for the observation interval and limits. Public IPv6 forwarding, sleep/wake recovery and a fresh Antigravity browser login remain unverified.

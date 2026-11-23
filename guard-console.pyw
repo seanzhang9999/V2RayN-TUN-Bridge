@@ -132,7 +132,7 @@ class Console:
         body.pack(fill='both', expand=True)
         header = ttk.Frame(body)
         header.pack(fill='x', pady=(0, 10))
-        ttk.Label(header, text='出站保护 · 0.3.4-rc.1', font=('Microsoft YaHei UI', 18, 'bold')).pack(side='left')
+        ttk.Label(header, text='出站保护 · 0.3.4-rc.2', font=('Microsoft YaHei UI', 18, 'bold')).pack(side='left')
         self.off = ttk.Button(header, text='关闭保护', command=lambda: self.control('off'))
         self.off.pack(side='right')
         self.on = ttk.Button(header, text='开启保护', command=lambda: self.control('on'))
