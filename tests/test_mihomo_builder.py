@@ -62,6 +62,41 @@ SIGNATURE = NetworkSignature(
 
 
 class MihomoBuilderTests(unittest.TestCase):
+    def test_guarded_tun_preserves_ssh_route_to_node_and_matches_only_xray(self):
+        from types import SimpleNamespace
+        relay = SimpleNamespace(exe=Path("C:/v2rayN/bin/Xray/xray.exe"), port=18000,
+                                identity="00000000-0000-4000-8000-000000000001")
+        cfg = build_mihomo_config(imported_config(), SIGNATURE, mode="full-ipv4-tun",
+                                  use_local_upstream=True, physical_egress=relay)
+        self.assertEqual(cfg["tun"]["route-exclude-address"], ["127.0.0.0/8"])
+        self.assertEqual(cfg["rules"], [f"PROCESS-PATH,{relay.exe},XRAY-PHYSICAL", "MATCH,PROXY"])
+        self.assertEqual(cfg["proxies"][0]["port"], 1081)
+        self.assertEqual(cfg["proxies"][1]["uuid"], relay.identity)
+
+    def test_local_socks_upstream_accepts_node_protocol_unknown_to_bridge(self):
+        from dataclasses import replace
+
+        imported = imported_config()
+        imported = replace(imported, profile=replace(imported.profile, config_type=999))
+        config = build_mihomo_config(
+            imported, SIGNATURE, mode="mixed-only", use_local_upstream=True
+        )
+        self.assertEqual(config["proxies"][0]["type"], "socks5")
+        self.assertEqual(config["proxies"][0]["port"], 1081)
+
+    def test_local_upstream_keeps_base_proxy_and_drops_imported_direct_rules(self):
+        config = build_mihomo_config(
+            imported_config(), SIGNATURE, mode="full-ipv4-tun", use_local_upstream=True
+        )
+        self.assertEqual(config["mixed-port"], 1082)
+        self.assertEqual(config["proxies"], [{
+            "name": "proxy-node", "type": "socks5", "server": "127.0.0.1",
+            "port": 1081, "udp": True,
+        }])
+        self.assertEqual(config["rules"], ["MATCH,PROXY"])
+        self.assertTrue(config["tun"]["strict-route"])
+        self.assertNotIn("198.51.100.7/32", config["tun"]["route-exclude-address"])
+
     def build(self, mode="full-ipv4-tun"):
         return build_mihomo_config(imported_config(), SIGNATURE, mode=mode)
 

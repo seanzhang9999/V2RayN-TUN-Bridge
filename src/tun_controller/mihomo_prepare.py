@@ -41,8 +41,10 @@ def prepare_mihomo_configs(
     network_signature=None,
     profile_id: str | None = None,
     mixed_port: int = 1082,
+    use_local_upstream: bool = False,
     controller_port: int | None = None,
     controller_secret: str = "",
+    physical_egress=None,
 ) -> dict[str, object]:
     imported = load_v2rayn_config(app_root, profile_id=profile_id)
     signature = network_signature or detect_network_signature(
@@ -69,8 +71,10 @@ def prepare_mihomo_configs(
                 signature,
                 mode=mode,
                 mixed_port=mixed_port,
+                use_local_upstream=use_local_upstream,
                 controller_port=controller_port,
                 controller_secret=controller_secret,
+                physical_egress=physical_egress,
             )
             destination = output_dir / FILENAMES[mode]
             temporary = destination.with_suffix(".json.tmp")

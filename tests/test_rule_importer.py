@@ -35,12 +35,12 @@ class RuleImporterTests(unittest.TestCase):
 
     def test_accepts_v2rayn_style_trailing_commas(self):
         result = parse_switchyomega_rules(
-            "domain:openagi.duckdns.org,\ndomain:qq.com,\nfull:internal.example.com"
+            "domain:node.example.org,\ndomain:qq.com,\nfull:internal.example.com"
         )
         self.assertEqual(
             [rule.domains[0] for rule in result.rules],
             [
-                "domain:openagi.duckdns.org",
+                "domain:node.example.org",
                 "domain:qq.com",
                 "full:internal.example.com",
             ],

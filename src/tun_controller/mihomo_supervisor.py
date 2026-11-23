@@ -15,9 +15,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from tun_controller.ping_health import PingOutage, ping_connected, CHECK_INTERVAL
+from tun_controller.restart_consent import RestartConsent, session_locked
 from tun_controller.mihomo_prepare import prepare_mihomo_configs
+from tun_controller.physical_egress import PhysicalEgress
 from tun_controller.network_monitor import NetworkSignature, detect_network_signature
-from tun_controller.proxy_endpoint import resolve_proxy_server_ipv4
+from tun_controller.proxy_endpoint import guarded_proxy_ipv4, resolve_proxy_server_ipv4
 from tun_controller.v2rayn_source import DEFAULT_APP_ROOT, load_v2rayn_config
 
 
@@ -127,13 +130,14 @@ class MihomoSupervisor:
         app_root: Path,
         script_root: Path,
         *,
-        manage_v2rayn: bool = True,
+        manage_v2rayn: bool = False,
         profile_id: str | None = None,
     ) -> None:
         self.runtime_root = runtime_root
         self.app_root = app_root
         self.script_root = script_root
         self.manage_v2rayn = manage_v2rayn
+        self.physical_egress = None
         self.profile_id = profile_id
         # Automatic handoff replaces v2rayN on its familiar local endpoint.
         # Manual coexistence must retain 1082 because v2rayN owns 1081.
@@ -163,6 +167,8 @@ class MihomoSupervisor:
         self.checkpoint = "created"
         self.health_checks: dict[str, dict[str, Any]] = {}
         self.profile_summary: dict[str, Any] = {}
+        self.restart_consent = RestartConsent()
+        self.ping_outage = PingOutage()
 
     def run(self) -> int:
         self.runtime_root.mkdir(parents=True, exist_ok=True)
@@ -171,6 +177,10 @@ class MihomoSupervisor:
         try:
             self.checkpoint = "initial-snapshot"
             snapshot = self._snapshot()
+            if not self.manage_v2rayn and os.environ.get("TUN_BRIDGE_GUARDED_START") == "1":
+                self.checkpoint = "start-physical-egress"
+                self.physical_egress = PhysicalEgress(self.app_root, snapshot.network.interface_name)
+                self.physical_egress.start()
             self.checkpoint = "offline-prepare"
             self._prepare(snapshot.network)
             if self.manage_v2rayn:
@@ -208,10 +218,12 @@ class MihomoSupervisor:
             self._record_failure(exc)
             self._delete_sensitive_files()
             return 2
+        finally:
+            if self.physical_egress:
+                self.physical_egress.close()
 
     def _monitor(self, current: SourceSnapshot) -> int:
-        pending: SourceSnapshot | None = None
-        pending_count = 0
+        next_check = 0.0
         while not self.stop_request.exists():
             self._touch_heartbeat()
             if self.core is None:
@@ -229,27 +241,48 @@ class MihomoSupervisor:
                 )
                 raise SupervisorError(describe_core_exit(return_code, self.last_core_exit_reason))
             if not self.manage_v2rayn:
+                relay = self.physical_egress
+                if relay and (relay.process is None or relay.process.poll() is not None):
+                    relay.close()
+                    try:
+                        relay.start()
+                    except (OSError, RuntimeError) as exc:
+                        self._write_status("running", "physical-egress-unavailable", error_message=str(exc))
+                        time.sleep(5)
+                        continue
+                    self._write_status("running", "monitoring", network=current.network)
                 time.sleep(3)
                 continue
+            if time.monotonic() < next_check:
+                time.sleep(1)
+                continue
+            next_check = time.monotonic() + CHECK_INTERVAL
+            connected = ping_connected()
+            sustained = self.ping_outage.observe(connected)
+            if not sustained:
+                self.restart_consent.allow(None, None, "")
+                if connected is not False:
+                    self.restart_consent.seen.clear()
+                checkpoint = "ping-ok" if connected is True else "ping-unknown" if connected is None else "ping-rechecking"
+                self._write_status("running", checkpoint, network=current.network)
+                continue
             try:
-                observed = self._snapshot(current.network.proxy_ipv4)
+                candidate = self._snapshot(current.network.proxy_ipv4)
             except Exception:
-                observed = None
-            if observed is None or observed == current:
-                pending = None
-                pending_count = 0
-            elif observed == pending:
-                pending_count += 1
-            else:
-                pending = observed
-                pending_count = 1
-            if observed is not None and pending_count >= 2:
-                self._write_status("restarting", "network-or-config-change")
-                current = self._restart_guarded()
-                pending = None
-                pending_count = 0
+                self.restart_consent.allow(None, None, "")
+                self._write_status("running", "ping-failed-network-unavailable", network=current.network)
+                continue
+            # Approval follows the outage and effective network/profile identity,
+            # never GUI/database write timestamps.
+            identity = (self.ping_outage.episode, candidate.network, candidate.profile_id, candidate.route_id)
+            reason = "223.5.5.5 和 1.1.1.1 连续多轮 ping 不通，已持续至少 30 秒。尚不能据此断定 TUN 故障。"
+            allowed = self.restart_consent.allow(identity, self.ping_outage.episode, reason)
+            if allowed and not self.stop_request.exists():
+                current = self._restart_guarded(candidate, current)
                 self._write_status("running", "monitoring", network=current.network)
-            time.sleep(3)
+            else:
+                self._write_status("running", self.restart_consent.state, network=current.network)
+
 
         if self.manage_v2rayn:
             self._write_status("stopping", "stop-mihomo")
@@ -262,9 +295,29 @@ class MihomoSupervisor:
         self._delete_sensitive_files()
         return 0
 
-    def _restart_guarded(self) -> SourceSnapshot:
+    def _restart_guarded(self, approved: SourceSnapshot, baseline: SourceSnapshot) -> SourceSnapshot:
+        # Revalidate before interrupting a working core. A changed/unknown network
+        # invalidates approval and is retried by the monitor without disconnecting.
+        try:
+            snapshot = self._snapshot(approved.network.proxy_ipv4)
+        except Exception:
+            return baseline
+        if (snapshot.network, snapshot.profile_id, snapshot.route_id) != (approved.network, approved.profile_id, approved.route_id):
+            return baseline
+        if self.stop_request.exists():
+            return baseline
+        if self.restart_consent.state == "locked-auto-restart" and session_locked() is not True:
+            return baseline
+        # Final live veto after approval and preflight. Unknown also forbids restart.
+        if ping_connected() is not False:
+            return baseline
+        if self.restart_consent.state == "locked-auto-restart" and session_locked() is not True:
+            return baseline
+        if self.stop_request.exists():
+            return baseline
+        self.ping_outage.attempted()
+        self._write_status("restarting", self.restart_consent.state)
         self._stop_core()
-        snapshot = self._snapshot()
         self._prepare(snapshot.network)
         self._stop_v2rayn()
         self._start_core()
@@ -279,7 +332,9 @@ class MihomoSupervisor:
         self, pinned_proxy_ipv4: tuple[str, ...] | None = None
     ) -> SourceSnapshot:
         imported = load_v2rayn_config(self.app_root, profile_id=self.profile_id)
-        if pinned_proxy_ipv4 is None:
+        if not self.manage_v2rayn and os.environ.get("TUN_BRIDGE_GUARDED_START") == "1":
+            resolver = lambda host: guarded_proxy_ipv4(self.runtime_root, host, imported.profile.port)
+        elif pinned_proxy_ipv4 is None:
             resolver = lambda host: resolve_proxy_server_ipv4(
                 host, imported.profile.port, self.app_root
             )
@@ -303,8 +358,10 @@ class MihomoSupervisor:
             network_signature=network,
             profile_id=self.profile_id,
             mixed_port=self.mixed_port,
+            use_local_upstream=not self.manage_v2rayn,
             controller_port=CONTROLLER_PORT,
             controller_secret=self.controller_secret,
+            physical_egress=self.physical_egress,
         )
         summary = report.get("modes", {}).get("full-ipv4-tun", {})
         if isinstance(summary, dict):
@@ -405,9 +462,32 @@ class MihomoSupervisor:
                 f"$p=Get-NetTCPConnection -State Listen -LocalPort {self.mixed_port} -ErrorAction SilentlyContinue; "
                 "[bool]($a -and $a.Status -eq 'Up' -and $p)"
             ):
+                if not self.manage_v2rayn and os.environ.get("TUN_BRIDGE_GUARDED_START") == "1":
+                    self.checkpoint = "wait-guard-tun"
+                    self._write_status("starting", self.checkpoint)
+                    self._wait_guard_tun()
                 return
             time.sleep(0.3)
         raise SupervisorError("Mihomo TUN did not become ready")
+
+    def _wait_guard_tun(self) -> None:
+        # The listener can answer before WFP has permitted the new interface.
+        started = time.time()
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            if self.core.poll() is not None:
+                raise SupervisorError("等待保护确认时 TUN 内核已退出")
+            luid = ctypes.c_uint64()
+            status = _read_json(self.runtime_root / "guard-heartbeat.json") or {}
+            if (ctypes.windll.iphlpapi.ConvertInterfaceAliasToLuid(
+                    ctypes.c_wchar_p(TUN_NAME), ctypes.byref(luid)) == 0
+                    and luid.value and status.get("on") is True
+                    and status.get("tunLuid") == luid.value
+                    and started <= status.get("at", 0) <= time.time()):
+                return
+            self._touch_heartbeat()
+            time.sleep(0.25)
+        raise SupervisorError("TUN 网卡已启动，但出站保护未确认该网卡的 IPv4 / IPv6 放行规则")
 
     def _stop_core(self) -> None:
         try:
@@ -803,13 +883,17 @@ def main() -> int:
     parser.add_argument("--manual-v2rayn", action="store_true")
     parser.add_argument("--profile-id")
     args = parser.parse_args()
-    return MihomoSupervisor(
-        args.runtime_root,
-        args.app_root,
-        args.script_root,
-        manage_v2rayn=not args.manual_v2rayn,
-        profile_id=args.profile_id,
-    ).run()
+    from tun_controller.runtime_lease import RuntimeLease
+    with RuntimeLease(args.runtime_root) as acquired:
+        if not acquired:
+            return 11  # Another supervisor owns this runtime; do not touch its files.
+        return MihomoSupervisor(
+            args.runtime_root,
+            args.app_root,
+            args.script_root,
+            manage_v2rayn=False,
+            profile_id=args.profile_id,
+        ).run()
 
 
 if __name__ == "__main__":

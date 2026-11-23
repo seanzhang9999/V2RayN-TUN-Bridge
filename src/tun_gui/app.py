@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 from tkinter import filedialog, messagebox, Tk, StringVar, BooleanVar, Text, ttk
 
+from tun_controller.restart_consent import confirm_restart
 from tun_bridge import __version__
 from tun_bridge.resources import resource_root
 from tun_gui.monitor import (
@@ -33,7 +34,7 @@ from tun_controller.v2rayn_route_writer import (
     load_managed_v2rayn_rules,
     update_active_v2rayn_route,
 )
-from tun_controller.v2rayn_source import DEFAULT_APP_ROOT, list_v2rayn_profiles
+from tun_controller.v2rayn_source import DEFAULT_APP_ROOT
 
 PROJECT_ROOT = resource_root()
 CONTROL_SCRIPT = PROJECT_ROOT / "mihomo-tun.ps1"
@@ -53,6 +54,7 @@ class StatusFileWatcher:
         self._initialized = False
         self._signature: tuple[int, int] | None = None
         self._value: dict[str, Any] | None = None
+        self._last_read = 0.0
 
     def poll(self) -> tuple[bool, dict[str, Any] | None]:
         try:
@@ -65,20 +67,22 @@ class StatusFileWatcher:
             self._value = None
             return changed, None
 
-        if self._initialized and signature == self._signature:
+        if self._initialized and signature == self._signature and time.monotonic() - self._last_read < 5:
             return False, self._value
         try:
-            value = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            value = json.loads(self.path.read_text(encoding="utf-8-sig"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
             # A writer may be between replace operations. Retry on the next poll
             # instead of caching an unreadable version.
             return False, self._value
         if not isinstance(value, dict):
             return False, self._value
+        changed = not self._initialized or value != self._value
         self._initialized = True
         self._signature = signature
         self._value = value
-        return True, value
+        self._last_read = time.monotonic()
+        return changed, value
 
 
 def _process_exists(pid: int) -> bool:
@@ -152,7 +156,8 @@ def build_control_command(
         str(app_root),
     ]
     if action in {"Start", "Restart"}:
-        args += ["-ProfileId", profile_id]
+        if profile_id:
+            args += ["-ProfileId", profile_id]
         if manual_v2rayn:
             args.append("-ManualV2rayN")
     if elevated:
@@ -183,22 +188,17 @@ class TunGuiApp:
         self._configure_style()
 
         self.app_root_var = StringVar(value=str(DEFAULT_APP_ROOT))
-        self.profile_display_var = StringVar()
         self.status_var = StringVar(value="未启动")
         self.checkpoint_var = StringVar(value="")
         self.route_var = StringVar(value="")
         self.message_var = StringVar(value="就绪，正在读取配置…")
-        self.profile_supported_var = StringVar(value="")
-        self.unsupported_var = StringVar(value="")
-        self.manual_var = BooleanVar(value=False)
+        self.manual_var = BooleanVar(value=True)
         self.proxy_speed_var = StringVar(value="↑ 0 B/s    ↓ 0 B/s")
         self.direct_speed_var = StringVar(value="↑ 0 B/s    ↓ 0 B/s")
         self.monitor_status_var = StringVar(value="等待 Mihomo 启动")
         self.proxy_info_var = StringVar(value="尚未读取到当前代理")
         self.snapshot_status_var = StringVar(value="尚未开始快照")
 
-        self._profiles: list[str] = []
-        self._profile_lookup: dict[str, str] = {}
         self._health_rows: dict[str, tuple[StringVar, StringVar]] = {}
         self._cmd_queue: "queue.Queue[tuple[str, Any]]" = queue.Queue()
         self._busy = False
@@ -209,7 +209,6 @@ class TunGuiApp:
         self._build_ui()
         self._append_persisted_failure()
         self._load_settings()
-        self.refresh_profiles()
         self._poll_status()
         self._poll_queue()
         threading.Thread(target=self._monitor_loop, daemon=True).start()
@@ -281,42 +280,7 @@ class TunGuiApp:
         )
         ttk.Button(path_row, text="浏览", command=self._choose_app_root).pack(side="right")
 
-        profile_row = ttk.Frame(frame)
-        profile_row.pack(fill="x", pady=(10, 0))
-        ttk.Label(profile_row, text="支持的节点").pack(side="left")
-        self.profile_combo = ttk.Combobox(
-            profile_row, textvariable=self.profile_display_var, width=72, state="readonly"
-        )
-        self.profile_combo.pack(side="left", padx=(12, 8), fill="x", expand=True)
-        self.profile_combo.bind("<<ComboboxSelected>>", self._on_profile_select)
-        ttk.Button(
-            profile_row,
-            text="刷新并重测",
-            command=self._refresh_profiles_and_retest,
-        ).pack(side="right")
-
-        bottom_row = ttk.Frame(frame)
-        bottom_row.pack(fill="x", pady=(8, 0))
-        ttk.Checkbutton(
-            bottom_row,
-            text="兼容模式：保留 v2rayN（Mihomo 使用 1082）",
-            variable=self.manual_var,
-        ).pack(side="left")
-        ttk.Label(bottom_row, textvariable=self.profile_supported_var, foreground="#c3e8ff").pack(
-            side="right"
-        )
-
-        notes_row = ttk.Frame(frame)
-        notes_row.pack(fill="x")
-        ttk.Label(notes_row, textvariable=self.unsupported_var, foreground="#97d6ff").pack(anchor="w")
-
-        tools_row = ttk.Frame(frame)
-        tools_row.pack(fill="x", pady=(8, 0))
-        ttk.Button(
-            tools_row,
-            text="Bridge 路由管理",
-            command=self._open_switchyomega_tool,
-        ).pack(side="left")
+        ttk.Label(frame, text="节点和代理规则请在 v2rayN 中设置。").pack(anchor="w")
 
     def _build_action_section(self, parent: ttk.Frame) -> None:
         frame = ttk.LabelFrame(parent, text="2) 启动与停止", padding=12)
@@ -503,15 +467,11 @@ class TunGuiApp:
         app_root = str(data.get("app_root", "") or "")
         if app_root:
             self.app_root_var.set(app_root)
-        last_profile = str(data.get("last_profile_id", "") or "")
-        if last_profile:
-            self.profile_display_var.set(last_profile)
 
     def _save_settings(self) -> None:
         RUNTIME_ROOT.mkdir(parents=True, exist_ok=True)
         payload = {
             "app_root": self.app_root_var.get().strip(),
-            "last_profile_id": self.profile_display_var.get(),
             "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
         SETTINGS_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -523,14 +483,7 @@ class TunGuiApp:
         )
         if value:
             self.app_root_var.set(value)
-            self.save_and_refresh()
-
-    def save_and_refresh(self) -> None:
-        self._save_settings()
-        self.refresh_profiles()
-
-    def _on_profile_select(self, _event: Any = None) -> None:
-        self._save_settings()
+            self._save_settings()
 
     def _set_busy(self, busy: bool) -> None:
         self._busy = busy
@@ -538,60 +491,6 @@ class TunGuiApp:
         self.stop_btn.config(state="disabled" if busy else "normal")
         self.restart_btn.config(state="disabled" if busy else "normal")
         self.retest_btn.config(state="disabled" if busy else "normal")
-        self.profile_combo.config(state="disabled" if busy else "readonly")
-
-    def refresh_profiles(self) -> None:
-        app_root = Path(self.app_root_var.get().strip())
-        self._append_log("读取 v2rayN profile 列表…")
-        try:
-            if not app_root.is_dir():
-                raise FileNotFoundError(f"目录不存在：{app_root}")
-            summaries = list_v2rayn_profiles(app_root)
-            supported = [s for s in summaries if s.supported]
-            unsupported = [s for s in summaries if not s.supported]
-            self._profiles = supported
-            display_items: list[str] = []
-            self._profile_lookup.clear()
-            for summary in supported:
-                item = f"{summary.remarks}  [{summary.protocol}/{summary.transport}]"
-                display_items.append(item)
-                self._profile_lookup[item] = summary.profile_id
-
-            self.profile_combo["values"] = display_items
-            self.unsupported_var.set(
-                f"当前目录可见：支持 {len(supported)} 个节点，暂不支持 {len(unsupported)} 个节点"
-            )
-            if supported:
-                preselect = next(
-                    (item for item in supported if item.profile_id == self._get_selected_profile_id()),
-                    supported[0],
-                )
-                self.profile_combo.set(f"{preselect.remarks}  [{preselect.protocol}/{preselect.transport}]")
-                self.profile_supported_var.set(f"已选：{preselect.remarks}｜{preselect.support_detail}")
-            else:
-                self.profile_combo.set("")
-                self.profile_supported_var.set("未找到可用支持节点；请确认协议为 Hysteria2 / VLESS(tcp/raw/grpc/ws)")
-            self._save_settings()
-            self.message_var.set("已刷新节点列表")
-        except Exception as exc:
-            self._append_log(f"刷新失败：{exc}")
-            self.message_var.set(f"刷新失败：{exc}")
-            self.profile_combo["values"] = []
-            self.profile_combo.set("")
-            self.profile_supported_var.set("未读取到可用节点")
-            self.unsupported_var.set("")
-
-        self._append_health(None)
-
-    def _refresh_profiles_and_retest(self) -> None:
-        if self._busy:
-            return
-        self.refresh_profiles()
-        self._retest_connectivity()
-
-    def _get_selected_profile_id(self) -> str:
-        display = self.profile_combo.get()
-        return self._profile_lookup.get(display, "")
 
     def _health_status(self, status: str | None, code: str) -> tuple[str, str]:
         if status == "passed":
@@ -625,171 +524,6 @@ class TunGuiApp:
         self.log_box.insert("end", f"[{time.strftime('%H:%M:%S')}] {message}\n")
         self.log_box.see("end")
         self.log_box.config(state="disabled")
-
-    def _open_switchyomega_tool(self) -> None:
-        from tkinter import Toplevel
-
-        window = Toplevel(self.root)
-        window.title("Bridge 路由管理")
-        window.geometry("980x720")
-        window.transient(self.root)
-
-        managed_frame = ttk.LabelFrame(window, text="1) 当前由 Bridge 管理的规则（可删改、可复制）", padding=10)
-        managed_frame.pack(fill="both", expand=True, padx=10, pady=(10, 5))
-        proxy_side = ttk.Frame(managed_frame)
-        direct_side = ttk.Frame(managed_frame)
-        proxy_side.pack(side="left", fill="both", expand=True, padx=(0, 5))
-        direct_side.pack(side="left", fill="both", expand=True, padx=(5, 0))
-        ttk.Label(proxy_side, text="Proxy").pack(anchor="w")
-        proxy_box = Text(proxy_side, height=12, bg="#0b1420", fg="#dce7ff")
-        proxy_box.pack(fill="both", expand=True)
-        ttk.Label(direct_side, text="Direct").pack(anchor="w")
-        direct_box = Text(direct_side, height=12, bg="#0b1420", fg="#dce7ff")
-        direct_box.pack(fill="both", expand=True)
-
-        new_frame = ttk.LabelFrame(window, text="2) 新的 SwitchyOmega 条件", padding=10)
-        new_frame.pack(fill="both", expand=True, padx=10, pady=5)
-        input_box = Text(new_frame, height=9, bg="#0b1420", fg="#dce7ff")
-        input_box.pack(fill="both", expand=True)
-
-        preview_frame = ttk.LabelFrame(window, text="3) 合并预览", padding=10)
-        preview_frame.pack(fill="both", expand=True, padx=10, pady=(5, 10))
-        preview_box = Text(preview_frame, height=10, bg="#081117", fg="#c9ffb8")
-        preview_box.pack(fill="both", expand=True)
-
-        def copy_widget(widget: Text) -> None:
-            self.root.clipboard_clear()
-            self.root.clipboard_append(widget.get("1.0", "end").strip())
-
-        def load_current() -> None:
-            try:
-                managed = load_managed_v2rayn_rules(Path(self.app_root_var.get().strip()))
-                for widget, key in ((proxy_box, "proxy"), (direct_box, "direct")):
-                    widget.delete("1.0", "end")
-                    widget.insert("1.0", format_managed_rule_lines(managed[key]))
-                self._append_log(
-                    f"已读取 Bridge 管理规则：Proxy {len(managed['proxy'])} 组，Direct {len(managed['direct'])} 组"
-                )
-            except Exception as exc:
-                messagebox.showwarning("读取失败", str(exc))
-
-        def merged_rules() -> tuple[Any, ...]:
-            existing_proxy = parse_managed_rule_lines(proxy_box.get("1.0", "end"), "proxy")
-            existing_direct = parse_managed_rule_lines(direct_box.get("1.0", "end"), "direct")
-            imported = parse_switchyomega_rules(input_box.get("1.0", "end"))
-            return merge_routing_rules(existing_proxy, existing_direct, imported.rules)
-
-        def preview() -> None:
-            rules = merged_rules()
-            proxy = [rule for rule in rules if rule.outbound_tag.lower() == "proxy"]
-            direct = [rule for rule in rules if rule.outbound_tag.lower() == "direct"]
-            text = "# PROXY\n" + format_managed_rule_lines(proxy)
-            text += "\n\n# DIRECT\n" + format_managed_rule_lines(direct)
-            preview_box.delete("1.0", "end")
-            preview_box.insert("1.0", text)
-
-        def paste_new() -> None:
-            try:
-                input_box.delete("1.0", "end")
-                input_box.insert("1.0", self.root.clipboard_get())
-                preview()
-            except Exception:
-                messagebox.showwarning("提示", "剪贴板中没有可用文本")
-
-        def apply_and_restart() -> None:
-            rules = merged_rules()
-            if not rules:
-                messagebox.showwarning("提示", "合并结果为空；如需清空请至少保留一条后再操作")
-                return
-            preview()
-            self._begin_route_update(rules)
-
-        buttons = ttk.Frame(preview_frame)
-        buttons.pack(fill="x", pady=(8, 0))
-        ttk.Button(buttons, text="重新读取现有规则", command=load_current).pack(side="left")
-        ttk.Button(buttons, text="复制 Proxy", command=lambda: copy_widget(proxy_box)).pack(side="left", padx=(8, 0))
-        ttk.Button(buttons, text="复制 Direct", command=lambda: copy_widget(direct_box)).pack(side="left", padx=(8, 0))
-        ttk.Button(buttons, text="粘贴新条件", command=paste_new).pack(side="left", padx=(8, 0))
-        ttk.Button(buttons, text="合并预览", command=preview).pack(side="left", padx=(8, 0))
-        ttk.Button(buttons, text="整体替换并重启", command=apply_and_restart).pack(side="right")
-        load_current()
-
-    def _begin_route_update(self, rules: tuple[Any, ...]) -> None:
-        if self._busy:
-            messagebox.showwarning("提示", "当前有操作正在执行，请稍候")
-            return
-        app_root_text = self.app_root_var.get().strip()
-        profile_id = self._get_selected_profile_id()
-        if not app_root_text or not profile_id:
-            messagebox.showwarning("提示", "请先选择有效的 v2rayN 目录和节点")
-            return
-        self._save_settings()
-        self._set_busy(True)
-        self.message_var.set("正在备份并更新 v2rayN 激活路由…")
-        self._append_log("开始更新 v2rayN 激活路由；写入前将自动备份原路由")
-        threading.Thread(
-            target=self._run_route_update,
-            args=(
-                Path(app_root_text),
-                profile_id,
-                tuple(rules),
-                bool(self.manual_var.get()),
-                self._is_admin(),
-            ),
-            daemon=True,
-        ).start()
-
-    def _run_route_update(
-        self,
-        app_root: Path,
-        profile_id: str,
-        rules: tuple[Any, ...],
-        manual_v2rayn: bool,
-        elevated: bool,
-    ) -> None:
-        try:
-            report = update_active_v2rayn_route(
-                app_root,
-                rules,
-                backup_root=RUNTIME_ROOT / "route-backups",
-            )
-            executable = Path(sys.executable) if getattr(sys, "frozen", False) else None
-            stop = subprocess.run(
-                build_control_command(
-                    "Stop", app_root, elevated=elevated, app_executable=executable
-                ),
-                cwd=PROJECT_ROOT,
-                capture_output=True,
-                text=True,
-                check=False,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
-            start = subprocess.run(
-                build_control_command(
-                    "Start",
-                    app_root,
-                    profile_id=profile_id,
-                    manual_v2rayn=manual_v2rayn,
-                    elevated=elevated,
-                    app_executable=executable,
-                ),
-                cwd=PROJECT_ROOT,
-                capture_output=True,
-                text=True,
-                check=False,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
-            self._cmd_queue.put(("route-update-done", {
-                "ok": start.returncode == 0,
-                "route": report.get("route_name", ""),
-                "rules": report.get("imported_rule_count", 0),
-                "backup": report.get("backup_path", ""),
-                "stop_code": stop.returncode,
-                "start_code": start.returncode,
-                "detail": (start.stderr or start.stdout or "").strip(),
-            }))
-        except Exception as exc:
-            self._cmd_queue.put(("route-update-done", {"ok": False, "detail": str(exc)}))
 
     def _monitor_loop(self) -> None:
         """Fetch controller data away from Tk's main thread."""
@@ -922,8 +656,11 @@ class TunGuiApp:
             stderr = (process.stderr or "").strip()
             ok = process.returncode == 0
             message = "操作完成" if ok else f"执行返回码 {process.returncode}"
-            if not ok and not stdout and not stderr:
-                message = "执行失败（无输出）"
+            if action == "Restart" and process.returncode == 10:
+                ok = True
+                message = "已取消重启，保留当前连接"
+            elif not ok and not stdout and not stderr:
+                message = f"执行失败（返回码 {process.returncode}，无输出）"
             self._cmd_queue.put(
                 (
                     "done",
@@ -945,15 +682,10 @@ class TunGuiApp:
         if action in {"Start", "Restart"} and not app_root_text:
             messagebox.showwarning("提示", "v2rayN 路径为空")
             return
-        profile_id = self._get_selected_profile_id() if action in {"Start", "Restart"} else ""
-        if action in {"Start", "Restart"} and not profile_id:
-            messagebox.showwarning("提示", "当前无可启动的可用节点，或未选中任何节点")
-            return
         self._save_settings()
         args = build_control_command(
             action,
             Path(app_root_text or "."),
-            profile_id=profile_id,
             manual_v2rayn=bool(self.manual_var.get()),
             elevated=self._is_admin(),
             app_executable=Path(sys.executable) if getattr(sys, "frozen", False) else None,
@@ -1008,6 +740,14 @@ class TunGuiApp:
         self._cmd_queue.put(("connectivity-done", checks))
 
     def _poll_status(self) -> None:
+        try:
+            self._render_status()
+        except Exception as exc:
+            self.message_var.set(f"状态刷新异常（{type(exc).__name__}），正在重试；后台连接不受影响")
+        finally:
+            self.root.after(750, self._poll_status)
+
+    def _render_status(self) -> None:
         changed, status = self._status_watcher.poll()
         if status:
             state = str(status.get("state") or "unknown")
@@ -1063,7 +803,17 @@ class TunGuiApp:
                 if changed:
                     self._append_log(f"运行状态: failed - {detail}")
             elif state == "running":
-                if checkpoint.startswith("health-") or checkpoint == "connectivity-tests":
+                if checkpoint == "awaiting-restart-approval":
+                    self.message_var.set("连续 ping 不通，等待重启确认；恢复连通后取消重启")
+                elif checkpoint == "restart-deferred":
+                    self.message_var.set("已暂缓重启；可手动重启，或锁屏后自动恢复")
+                elif checkpoint == "ping-ok":
+                    self.message_var.set("Ping 连通，保持当前 TUN；文件变化不会触发重启")
+                elif checkpoint == "ping-unknown":
+                    self.message_var.set("Ping 检测未完成，保持运行，不据此重启")
+                elif checkpoint in {"ping-rechecking", "ping-failed-network-unavailable"}:
+                    self.message_var.set("Ping 暂未连通，正在复查；尚未重启")
+                elif checkpoint.startswith("health-") or checkpoint == "connectivity-tests":
                     self.message_var.set("TUN 已运行，正在收集网站检测结果（结果不影响运行）")
                 else:
                     self.message_var.set("TUN 已在线运行；网站检测结果仅供参考")
@@ -1076,7 +826,6 @@ class TunGuiApp:
             self.checkpoint_var.set("—")
             self.route_var.set("—")
             self._append_health(None)
-        self.root.after(750, self._poll_status)
 
     def _poll_queue(self) -> None:
         while True:
@@ -1116,20 +865,6 @@ class TunGuiApp:
                 )
                 self.message_var.set(f"联通检测完成：{passed}/{len(self.CHECKS)} 项通过（仅提示）")
                 self._append_log(f"联通检测完成：{passed}/{len(self.CHECKS)} 项通过；不改变 TUN 状态")
-            elif kind == "route-update-done":
-                self._set_busy(False)
-                if payload.get("ok"):
-                    message = (
-                        f"已向 {payload.get('route')} 写入 {payload.get('rules')} 条规则，"
-                        "Bridge 已重启"
-                    )
-                    self.message_var.set(message)
-                    self._append_log(message)
-                    self._append_log(f"原路由备份：{payload.get('backup')}")
-                else:
-                    detail = payload.get("detail") or "未知错误"
-                    self.message_var.set(f"路由更新或重启失败：{detail}")
-                    self._append_log(f"路由更新或重启失败：{detail}")
         self.root.after(200, self._poll_queue)
 
     def _on_close(self) -> None:

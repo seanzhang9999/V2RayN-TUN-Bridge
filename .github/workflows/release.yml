@@ -1,13 +1,10 @@
 name: Release
-
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
-
 permissions:
   contents: write
-
 jobs:
   build:
     runs-on: windows-latest
@@ -16,27 +13,25 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Install build tools
-        run: python -m pip install -r requirements-build.txt
-      - name: Fetch verified runtime
+      - name: Restore and verify the tested runtime from the immutable prior asset
         shell: pwsh
-        run: ./packaging/fetch-runtime.ps1
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP prior-release.zip
+          Invoke-WebRequest -Uri 'https://github.com/seanzhang9999/V2RayN-TUN-Bridge/releases/download/v0.2.4/V2RayN-TUN-Bridge-v0.2.4-windows-x64.zip' -OutFile $archive
+          python packaging/guard_release.py $archive
       - name: Test
         shell: pwsh
         run: |
-          $env:PYTHONPATH = Join-Path $PWD 'src'
+          $env:PYTHONPATH = Join-Path $PWD src
           python -m unittest discover -s tests -v
-      - name: Build portable app
-        run: pyinstaller --noconfirm V2RayN-TUN-Bridge.spec
-      - name: Package
-        shell: pwsh
-        run: |
-          Compress-Archive -Path 'dist/V2RayN-TUN-Bridge/*' -DestinationPath 'V2RayN-TUN-Bridge-windows-x64.zip'
-          (Get-FileHash -Algorithm SHA256 'V2RayN-TUN-Bridge-windows-x64.zip').Hash.ToLowerInvariant() + '  V2RayN-TUN-Bridge-windows-x64.zip' | Set-Content 'SHA256SUMS.txt'
+      - name: Package and verify the guard console
+        run: python packaging/guard_release.py
       - uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
+        if: github.ref == 'refs/tags/v0.3.4-rc.1'
         with:
-          generate_release_notes: true
+          prerelease: true
+          body_path: docs/release-v0.3.4-rc.1.md
+          fail_on_unmatched_files: true
           files: |
-            V2RayN-TUN-Bridge-windows-x64.zip
-            SHA256SUMS.txt
+            dist/V2RayN-TUN-Bridge-*-windows-x64.zip
+            dist/SHA256SUMS.txt

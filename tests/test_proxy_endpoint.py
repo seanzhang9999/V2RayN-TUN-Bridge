@@ -1,4 +1,7 @@
+import json
 import sys
+import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -7,10 +10,27 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from tun_controller.network_monitor import NetworkDetectionError
-from tun_controller.proxy_endpoint import resolve_proxy_server_ipv4
+from tun_controller.proxy_endpoint import guarded_proxy_ipv4, resolve_proxy_server_ipv4
 
 
 class ProxyEndpointTests(unittest.TestCase):
+    def test_guarded_start_only_consumes_current_committed_endpoint(self):
+        record = dict(on=True, at=time.time(), host="node.example", port=8443,
+                      addresses=["1.1.1.1", "8.8.8.8"])
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            heartbeat = root / "guard-heartbeat.json"
+            heartbeat.write_text(json.dumps(record))
+            self.assertEqual(guarded_proxy_ipv4(root, "NODE.example", 8443),
+                             ("1.1.1.1", "8.8.8.8"))
+            for change in (dict(on=False), dict(at=0), dict(host="old.example"),
+                           dict(port=443), dict(addresses=[]),
+                           dict(addresses=["1.1.1.1", "198.18.0.2"])):
+                with self.subTest(change=change):
+                    heartbeat.write_text(json.dumps({**record, **change}))
+                    with self.assertRaises(NetworkDetectionError):
+                        guarded_proxy_ipv4(root, "node.example", 8443)
+
     def test_live_verified_core_endpoint_has_priority_over_dns(self):
         dns_calls = []
         result = resolve_proxy_server_ipv4(

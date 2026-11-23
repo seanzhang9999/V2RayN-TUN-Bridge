@@ -19,7 +19,7 @@ def load_managed_v2rayn_rules(app_root: Path) -> dict[str, tuple[RoutingRule, ..
     gui_path = app_root / "guiConfigs" / "guiNConfig.json"
     gui = json.loads(gui_path.read_text(encoding="utf-8-sig"))
     connection = sqlite3.connect(
-        f"file:{database_path.resolve().as_posix()}?mode=ro", uri=True, timeout=1.0
+        database_path.resolve().as_uri() + "?mode=ro", uri=True, timeout=1.0
     )
     connection.row_factory = sqlite3.Row
     try:

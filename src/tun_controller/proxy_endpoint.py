@@ -6,6 +6,7 @@ import ipaddress
 import json
 import os
 import subprocess
+import time
 from collections.abc import Callable, Iterable
 from pathlib import Path
 
@@ -15,6 +16,29 @@ from tun_controller.network_monitor import NetworkDetectionError
 
 CREATE_NO_WINDOW = 0x08000000
 FAKE_IP_NETWORK = ipaddress.IPv4Network("198.18.0.0/15")
+
+
+def guarded_proxy_ipv4(runtime_root: Path, host: str, port: int) -> tuple[str, ...]:
+    """Use only the endpoint published by the watcher after its WFP commit."""
+    try:
+        record = json.loads((runtime_root / "guard-heartbeat.json").read_text(encoding="utf-8"))
+        if not isinstance(record, dict) or record.get("on") is not True:
+            raise ValueError
+        if not 0 <= time.time() - record["at"] <= 30:
+            raise ValueError
+        if record["host"].casefold() != host.casefold() or record["port"] != port:
+            raise ValueError
+        values = record["addresses"]
+        if not isinstance(values, list) or not values:
+            raise ValueError
+        ips = [ipaddress.IPv4Address(value) for value in values if isinstance(value, str)]
+        if len(ips) != len(values) or not all(ip.is_global and not ip.is_multicast for ip in ips):
+            raise ValueError
+        return tuple(dict.fromkeys(map(str, ips)))
+    except (AttributeError, KeyError, OSError, TypeError, ValueError):
+        raise NetworkDetectionError(
+            "出站保护尚未确认当前节点的 IPv4 地址，请检查 v2rayN 的 1081 代理和保护状态"
+        ) from None
 
 
 def resolve_proxy_server_ipv4(

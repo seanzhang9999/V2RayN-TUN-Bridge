@@ -23,8 +23,8 @@ from tun_bridge import __version__
 
 class TunGuiCommandTests(unittest.TestCase):
     def test_version_is_visible_in_application_title(self):
-        self.assertEqual(__version__, "0.2.4")
-        self.assertIn("v0.2.4", APP_TITLE)
+        self.assertEqual(__version__, "0.3.4-rc.1")
+        self.assertIn("v0.3.4-rc.1", APP_TITLE)
 
     def test_retest_button_belongs_to_connectivity_tab_not_snapshot_tab(self):
         health_source = inspect.getsource(TunGuiApp._build_health_section)
@@ -32,10 +32,9 @@ class TunGuiCommandTests(unittest.TestCase):
         self.assertIn('text="重测联通"', health_source)
         self.assertNotIn('text="重测联通"', snapshot_source)
 
-    def test_profile_refresh_also_triggers_connectivity_retest(self):
-        source = inspect.getsource(TunGuiApp._refresh_profiles_and_retest)
-        self.assertIn("self.refresh_profiles()", source)
-        self.assertIn("self._retest_connectivity()", source)
+    def test_start_does_not_require_profile(self):
+        command = build_control_command("Start", Path("v2rayN"), elevated=True)
+        self.assertNotIn("-ProfileId", command)
 
     def test_persisted_failure_is_clearly_historical(self):
         message = format_persisted_failure(

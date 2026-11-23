@@ -185,6 +185,9 @@ def detect_network_signature(
         )
         if not addresses:
             raise ValueError("no IPv4")
+    except (KeyError, TypeError, ValueError):
+        raise NetworkDetectionError("当前代理节点的 IPv4 地址解析失败") from None
+    try:
         return NetworkSignature(
             interface_index=int(route["interfaceIndex"]),
             interface_name=str(route["interfaceName"]),

@@ -1,106 +1,28 @@
 # V2RayN TUN Bridge
 
-[简体中文](README.zh-CN.md)
+Windows x64 console for an IPv4 Mihomo TUN and independent Windows Filtering Platform (WFP) egress protection. Keep node selection and traffic policy in v2rayN. [中文说明及网络拓扑图](README.zh-CN.md)
 
-A small Windows companion that reuses your existing v2rayN profiles and
-routing rules, then runs them through an independent system-wide TUN.
+## Packet paths
 
-It is built for a frustrating failure mode: the normal local proxy works, but
-TUN mode causes timeouts, DNS failures, or a routing loop. V2RayN TUN Bridge
-keeps v2rayN as the configuration source and uses a separately managed core for
-the actual TUN path.
+| Traffic | Path |
+| --- | --- |
+| Ordinary apps and OpenSSH | Windows route → Mihomo TUN → SOCKS at 127.0.0.1:1081 → v2rayN-managed Xray → selected outbound |
+| System proxy clients | Directly to v2rayN on 1081 |
+| Explicit Mihomo proxy clients | Mihomo mixed listener on 127.0.0.1:1082 → v2rayN on 1081 |
+| Xray socket captured again by TUN | Exact executable-path match → authenticated loopback VLESS listener → auxiliary Xray freedom outbound bound to the physical interface → WFP |
+| Captive portal | Dedicated Edge profile → PortalRelay → approved IP and port on the current physical link |
 
-## Highlights
+The VPN endpoint is exempted at the WFP layer for the Xray application, protocol and port. Its entire IP remains eligible for TUN capture, including ordinary SSH to that same host. Pure IP/CIDR direct rules and the China GeoIP set grant physical access only to the identified Xray executable. Domain rules remain part of Xray routing. Unknown apps have no general physical Internet exception. Approved on-link LAN destinations have separate interface-scoped exceptions.
 
-- No subscription re-entry: reads the selected profile and active route from
-  the local v2rayN database.
-- Supports Hysteria2 and VLESS over TCP/raw, gRPC, or WebSocket.
-- Full IPv4 TUN plus a local mixed SOCKS/HTTP endpoint on `127.0.0.1:1081`.
-- Separates recent TUN and local mixed-proxy connections into two ten-entry
-  views, with destinations, instantaneous speeds, and direct/proxy routing.
-- Detects physical-interface changes and safely rebuilds the route.
-- Website checks for Google, ChatGPT, and Baidu are diagnostics only.
-- Restart TUN safely from the GUI, or rerun connectivity diagnostics without changing the current TUN session.
-- Writes SwitchyOmega conditions into v2rayN's active route after a credential-free route backup, then restarts Bridge to load the grouped proxy/direct rules.
-- Lists Bridge-managed Proxy and Direct entries for copy/edit, merge, deduplication, and replacement.
-- Captures an in-memory traffic window with every observed hostname, IP, inbound, route, process, and connection count.
-- Recovers HTTP, TLS, and QUIC hostnames from IP-only TUN connections so domain routing still applies when a browser uses encrypted DNS.
-- Re-resolves Direct-route domains with the current system DNS so domestic CDN traffic does not inherit an overseas proxy DNS answer.
-- Portable Windows build: no Python installation required.
+TUN uses fake-IP DNS and proxied DoH. When the physical egress helper needs a real address it resolves through DoH via 1081. The primary Xray retains its own DNS policy. WFP covers IPv4 and IPv6 physical egress; the TUN forwarding configuration and node discovery in this release are IPv4.
 
-## Download and run
+## Run the release
 
-1. Open the [latest release](https://github.com/seanzhang9999/V2RayN-TUN-Bridge/releases/latest).
-2. Download `V2RayN-TUN-Bridge-windows-x64.zip` and verify `SHA256SUMS.txt`.
-3. Extract the entire folder and run `V2RayN-TUN-Bridge.exe`.
-4. Select the folder containing `v2rayN.exe`, choose a supported profile, and
-   click **Start TUN**. Approve the Windows administrator prompt used to create
-   the adapter and routes.
-5. Click **Stop TUN** before starting v2rayN again. The app releases port 1081
-   but deliberately does not launch v2rayN for you.
+1. Extract the Windows x64 ZIP and install 64-bit Python 3.11+ with Tk and `python` on PATH. Start v2rayN with its Xray mixed/SOCKS listener on 1081. Edge is needed only for captive portal login.
+2. Run `python -X utf8 guard-console.pyw` and select the v2rayN installation folder on first use. Download the asset from [GitHub Releases](https://github.com/seanzhang9999/V2RayN-TUN-Bridge/releases).
+3. Select **开启保护并启动 TUN** to enable WFP and start TUN. Network changes request Windows administrator approval. **停止 TUN** stops only the tunnel. **关闭保护** removes Bridge protection to restore normal physical egress. Closing the console can leave protection active.
+4. Inspect recent TUN connections and command logs in the console. Runtime files are under `%LOCALAPPDATA%\v2rayn-tun-controller`. Wi-Fi LAN settings persist only when requested; captive-portal approvals are session-scoped.
 
-The first release is unsigned, so Windows may identify the publisher as
-unknown. Verify the SHA-256 checksum before running it.
+## Verification
 
-## Connection visibility
-
-The monitor has two views:
-
-- **Recent TUN connections** shows the last ten connections captured through
-  the virtual adapter.
-- **Recent 1081 proxy connections** shows the last ten connections accepted by
-  the local SOCKS/HTTP mixed endpoint.
-
-Both views retain the existing time, target, input, route, process, and live
-upload/download speed columns, including recently closed connections. A closed
-connection remains visible with a zero rate instead of a misleading cumulative
-byte count.
-
-The app asks the core for strict process detection. Windows can still label
-some service, kernel, UDP, or very short-lived traffic as unknown. Monitoring
-data remains in memory and is not written to disk.
-
-Failure diagnostics are different from connection history. The protected local
-runtime directory keeps up to 20 credential-free failure summaries plus one
-rotated copy of the previous status, watchdog report, core log, and supervisor
-log. This evidence survives a restart so a later investigation can identify
-the failed checkpoint and exit reason. Generated proxy configuration and
-controller secrets are never added to the history.
-
-## Requirements and limitations
-
-- Windows 11 x64; Windows 10 may work but is not yet a release target.
-- An existing v2rayN installation with a working profile and routing policy.
-- Administrator rights for TUN and route changes.
-- IPv4 TUN only in the current v0.1.x releases.
-- XHTTP is not yet supported.
-- The app currently understands the v2rayN 7.x storage layout used by the test
-  machine; please report redacted compatibility failures.
-
-## Development
-
-```powershell
-$env:PYTHONPATH = Join-Path $PWD 'src'
-python -m unittest discover -s tests -v
-python -m tun_bridge
-```
-
-To build a release locally:
-
-```powershell
-python -m pip install -r requirements-build.txt
-./packaging/fetch-runtime.ps1
-pyinstaller --noconfirm V2RayN-TUN-Bridge.spec
-```
-
-Runtime downloads are version-pinned and SHA-256 verified. Core binaries and
-generated private configuration are excluded from Git.
-
-## Independence and licenses
-
-This project is not affiliated with v2rayN, MetaCubeX, or Clash Verge Rev. The
-application source is MIT licensed. Bundled third-party runtime components keep
-their own licenses; see [third-party notices](THIRD_PARTY_NOTICES.md).
-
-Please do not use this project to violate local laws, network policies, or the
-terms of any service.
+Two real OpenSSH servers returned the same negotiated host keys through an isolated TUN as on their baseline paths. The Xray process-path rule and physical relay were also exercised. Existing SSH sessions and the 1081 listener survived the test. Long-duration whole-machine protection, IPv6 end-to-end forwarding and the complete Antigravity login flow remain unverified for this release candidate.

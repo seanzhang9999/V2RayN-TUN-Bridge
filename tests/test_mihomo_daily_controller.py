@@ -24,14 +24,37 @@ from tun_controller.network_monitor import NetworkSignature
 
 
 class MihomoDailyControllerTests(unittest.TestCase):
-    def test_automatic_mode_uses_1081_and_compatibility_mode_uses_1082(self):
+    def test_guarded_readiness_waits_for_current_committed_luid(self):
+        module = "tun_controller.mihomo_supervisor"
+        supervisor = MihomoSupervisor(PROJECT_ROOT, PROJECT_ROOT, PROJECT_ROOT)
+        supervisor.core = mock.Mock()
+        supervisor.core.poll.return_value = None
+        def get_luid(_alias, output):
+            output._obj.value = 42
+            return 0
+        records = [
+            {"on": True, "at": 10, "tunLuid": 41},
+            {"on": True, "at": 9, "tunLuid": 42},
+            {"on": False, "at": 10, "tunLuid": 42},
+            {"on": True, "at": 10, "tunLuid": 42},
+        ]
+        with mock.patch(module + "._read_json", side_effect=records), \
+             mock.patch(module + ".ctypes.windll", create=True) as win, \
+             mock.patch(module + ".time.time", return_value=10), \
+             mock.patch(module + ".time.sleep"), mock.patch.object(supervisor, "_touch_heartbeat") as tick:
+            win.iphlpapi.ConvertInterfaceAliasToLuid.side_effect = get_luid
+            supervisor._wait_guard_tun()
+        self.assertEqual(tick.call_count, 3)
+
+    def test_default_and_compatibility_modes_preserve_port_1081(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             automatic = MihomoSupervisor(root, root, PROJECT_ROOT)
             compatibility = MihomoSupervisor(
                 root, root, PROJECT_ROOT, manage_v2rayn=False
             )
-        self.assertEqual(automatic.mixed_port, 1081)
+        self.assertFalse(automatic.manage_v2rayn)
+        self.assertEqual(automatic.mixed_port, 1082)
         self.assertEqual(compatibility.mixed_port, 1082)
 
     def test_automatic_handoff_releases_1081_before_start_and_never_autostarts_v2rayn(self):

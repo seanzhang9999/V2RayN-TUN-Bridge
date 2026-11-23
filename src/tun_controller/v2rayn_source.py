@@ -47,7 +47,7 @@ def _connect_read_only(
     connector: Callable[..., sqlite3.Connection] | None = None,
 ) -> sqlite3.Connection:
     connect = connector or sqlite3.connect
-    uri = f"file:{database_path.resolve().as_posix()}?mode=ro"
+    uri = database_path.resolve().as_uri() + "?mode=ro"
     for attempt in range(1, attempts + 1):
         try:
             return connect(uri, uri=True, timeout=0.1)

@@ -39,8 +39,10 @@ def build_mihomo_config(
     *,
     mode: str,
     mixed_port: int = 1082,
+    use_local_upstream: bool = False,
     controller_port: int | None = None,
     controller_secret: str = "",
+    physical_egress=None,
 ) -> dict[str, Any]:
     if mode not in _VALID_MODES:
         raise MihomoBuildError(f"Unsupported Mihomo test mode: {mode}")
@@ -48,15 +50,15 @@ def build_mihomo_config(
         raise MihomoBuildError("Invalid mixed proxy port")
     if not signature.proxy_ipv4:
         raise MihomoBuildError("The selected proxy server has no pinned IPv4 address")
-    proxy_ip = signature.proxy_ipv4[0]
     try:
-        proxy_address = ipaddress.IPv4Address(proxy_ip)
+        proxy_addresses = [ipaddress.IPv4Address(ip) for ip in signature.proxy_ipv4]
     except ipaddress.AddressValueError as exc:
         raise MihomoBuildError("The pinned proxy address is not IPv4") from exc
-    if proxy_address in _FAKE_IP_NETWORK:
+    if any(address in _FAKE_IP_NETWORK for address in proxy_addresses):
         raise MihomoBuildError(
             "The pinned proxy address is a fake-IP and cannot be used as an endpoint"
         )
+    proxy_ip = str(proxy_addresses[0])
 
     tun: dict[str, Any] = {
         "enable": mode != "mixed-only",
@@ -122,7 +124,36 @@ def build_mihomo_config(
             "direct-nameserver-follow-policy": False,
         },
         "tun": tun,
-        "proxies": [
+        "proxy-groups": [
+            {"name": "PROXY", "type": "select", "proxies": ["proxy-node"]}
+        ],
+        "rules": rules,
+    }
+    if use_local_upstream:
+        config.pop("interface-name", None)
+        config["proxies"] = [{"name": "proxy-node", "type": "socks5",
+                              "server": "127.0.0.1", "port": 1081, "udp": True}]
+        config["rules"] = ["MATCH,PROXY"]
+        tun["strict-route"] = True
+        tun["route-exclude-address"] = _deduplicate(
+            ["127.0.0.0/8", *(f"{ip}/32" for ip in proxy_addresses)]
+        )
+        config["dns"]["listen"] = "127.0.0.1:1053"
+        if physical_egress:
+            config["find-process-mode"] = "always"
+            config["proxies"].append({
+                "name": "XRAY-PHYSICAL", "type": "vless", "server": "127.0.0.1",
+                "port": physical_egress.port, "uuid": physical_egress.identity, "udp": True,
+            })
+            if "," in str(physical_egress.exe):
+                raise MihomoBuildError("Xray 安装路径包含规则分隔符")
+            config["rules"].insert(0, f"PROCESS-PATH,{physical_egress.exe},XRAY-PHYSICAL")
+            tun["route-exclude-address"] = ["127.0.0.0/8"]
+            # Retain literal destinations already resolved and selected by Xray.
+            config["sniffer"]["override-destination"] = False
+            config["sniffer"]["sniff"]["HTTP"]["override-destination"] = False
+    else:
+        config["proxies"] = [
             _build_proxy(imported.profile, imported, proxy_ip, signature.interface_name),
             {
                 "name": "DIRECT-BOUND",
@@ -131,12 +162,7 @@ def build_mihomo_config(
                 "ip-version": "ipv4",
                 "interface-name": signature.interface_name,
             },
-        ],
-        "proxy-groups": [
-            {"name": "PROXY", "type": "select", "proxies": ["proxy-node"]}
-        ],
-        "rules": rules,
-    }
+        ]
     if controller_port is not None:
         if not 1 <= controller_port <= 65535:
             raise MihomoBuildError("Invalid local controller port")

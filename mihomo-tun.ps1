@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory)]
     [ValidateSet('Start', 'Stop', 'Restart', 'Status')]
@@ -85,6 +85,20 @@ function Read-SafeStatus {
     }
 }
 
+function Get-RuntimeSupervisors {
+    # Status files are observations, not proof of process ownership.
+    @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
+        $command = [string]$_.CommandLine
+        $isSupervisor = ($_.Name -eq 'V2RayN-TUN-Bridge.exe' -and $command -match '--supervisor') -or
+            ($_.Name -match '^python(w)?\.exe$' -and $command -match 'tun_controller\.mihomo_supervisor')
+        if (-not $isSupervisor) { return $false }
+        if ($command -notmatch '--runtime-root\s+(?:"([^"]+)"|(\S+))') { return $false }
+        $candidateRoot = if ($Matches[1]) { $Matches[1] } else { $Matches[2] }
+        try { [IO.Path]::GetFullPath($candidateRoot).TrimEnd('\') -eq [IO.Path]::GetFullPath($RuntimeRoot).TrimEnd('\') }
+        catch { $false }
+    })
+}
+
 function Test-SupervisorRunning([object]$Status) {
     if (-not $Status -or -not $Status.supervisorPid) { return $false }
     return [bool](Get-Process -Id ([int]$Status.supervisorPid) -ErrorAction SilentlyContinue)
@@ -104,6 +118,16 @@ if ($Action -eq 'Status') {
 Protect-RuntimeRoot
 
 if ($Action -eq 'Restart') {
+    # Confirm before Stop, including direct command-line use. No response means
+    # this helper waits while the existing supervisor and heartbeat keep running.
+    if ($AppExecutable) {
+        $consent = Start-Process -FilePath $AppExecutable -ArgumentList '--confirm-restart' -WindowStyle Hidden -Wait -PassThru
+        if ($consent.ExitCode -ne 0) { exit $consent.ExitCode }
+    } else {
+        $env:PYTHONPATH = Join-Path $ScriptRoot 'src'
+        & python -m tun_bridge --confirm-restart
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    }
     & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File $PSCommandPath -Action Stop -AppRoot $AppRoot -Elevated
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     $restartArguments = @(
@@ -123,9 +147,10 @@ if ($Action -eq 'Start') {
     if (-not (Test-Path -LiteralPath (Join-Path $AppRoot 'v2rayN.exe') -PathType Leaf)) {
         throw 'invalid-v2rayn-root'
     }
-    $existing = Read-SafeStatus
-    if ($existing -and $existing.state -eq 'running' -and (Test-SupervisorRunning -Status $existing)) {
-        exit 0
+    $owners = @(Get-RuntimeSupervisors)
+    if ($owners.Count -gt 0) {
+        Write-Host 'TUN supervisor already exists; no second instance was started. Use Restart to apply changes.'
+        exit 11
     }
     Move-PreviousDiagnostic -Path $StatusPath
     Move-PreviousDiagnostic -Path $SupervisorStdout
@@ -172,21 +197,21 @@ if ($Action -eq 'Start') {
     exit 3
 }
 
-$status = Read-SafeStatus
-if (-not $status -or -not (Test-SupervisorRunning -Status $status)) {
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $ScriptRoot 'cleanup-tun.ps1') -Elevated
-    exit $LASTEXITCODE
+$owners = @(Get-RuntimeSupervisors)
+if ($owners.Count -gt 1) { throw 'Multiple runtime supervisors detected; refusing ambiguous stop.' }
+if ($owners.Count -eq 1) {
+    $targetSupervisorId = [int]$owners[0].ProcessId
+    'stop' | Set-Content -LiteralPath $StopRequestPath -Encoding ascii
+    $deadline = [DateTimeOffset]::UtcNow.AddSeconds(100)
+    do {
+        # A stale stopped/failed report from another process must not end this wait.
+        if (-not (Get-Process -Id $targetSupervisorId -ErrorAction SilentlyContinue)) { break }
+        Start-Sleep -Milliseconds 500
+    } while ([DateTimeOffset]::UtcNow -lt $deadline)
+    if (Get-Process -Id $targetSupervisorId -ErrorAction SilentlyContinue) {
+        Write-Error 'Supervisor has not exited; no new core will be started.'
+        exit 3
+    }
 }
-
-'stop' | Set-Content -LiteralPath $StopRequestPath -Encoding ascii
-$deadline = [DateTimeOffset]::UtcNow.AddSeconds(100)
-do {
-    $status = Read-SafeStatus
-    if ($status -and $status.state -eq 'stopped') { exit 0 }
-    if ($status -and $status.state -eq 'failed') { exit 2 }
-    if (-not (Test-SupervisorRunning -Status $status)) { break }
-    Start-Sleep -Milliseconds 500
-} while ([DateTimeOffset]::UtcNow -lt $deadline)
-
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $ScriptRoot 'cleanup-tun.ps1') -Elevated
 exit $LASTEXITCODE
