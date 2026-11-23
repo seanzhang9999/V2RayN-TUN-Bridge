@@ -19,7 +19,7 @@ TUN uses fake-IP DNS and proxied DoH. When the physical egress helper needs a re
 
 ## Run the release
 
-1. Extract the Windows x64 ZIP and install 64-bit Python 3.11+ with Tk and `python` on PATH. Start v2rayN with its Xray mixed/SOCKS listener on 1081. Edge is needed only for captive portal login.
+1. Extract the Windows x64 ZIP and install 64-bit Python 3.11+ with Tk and `python` on PATH. Start v2rayN with its Xray mixed/SOCKS listener on 1081. Edge is needed only for captive portal login. For UDP through TUN, enable UDP on the **v2rayN local SOCKS/mixed inbound on 1081** and apply the setting. A successful TCP request to 1081 only checks TCP. A SOCKS5 UDP ASSOCIATE reply with status 7 means the listener rejected that command.
 2. Run `python -X utf8 guard-console.pyw` and select the v2rayN installation folder on first use. Download the asset from [GitHub Releases](https://github.com/seanzhang9999/V2RayN-TUN-Bridge/releases).
 3. Select **开启保护并启动 TUN** to enable WFP and start TUN. Network changes request Windows administrator approval. **停止 TUN** stops only the tunnel. **关闭保护** removes Bridge protection to restore normal physical egress. Closing the console can leave protection active.
 4. Inspect recent TUN connections and command logs in the console. Runtime files are under `%LOCALAPPDATA%\v2rayn-tun-controller`. Wi-Fi LAN settings persist only when requested; captive-portal approvals are session-scoped.

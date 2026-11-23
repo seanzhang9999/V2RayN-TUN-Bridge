@@ -30,7 +30,7 @@ flowchart LR
 
 ## 启动与恢复
 
-1. 下载并解压 Windows x64 发行包。安装带 Tk 的 **64 位 Python 3.11 或更新版本**，确保 `python` 在 PATH 中。热点登录需 Microsoft Edge。[发行版](https://github.com/seanzhang9999/V2RayN-TUN-Bridge/releases)
+1. 下载并解压 Windows x64 发行包。安装带 Tk 的 **64 位 Python 3.11 或更新版本**，确保 `python` 在 PATH 中。热点登录需 Microsoft Edge。[发行版](https://github.com/seanzhang9999/V2RayN-TUN-Bridge/releases) 要让 TUN 转发 UDP，请在 **v2rayN 的 1081 本地 SOCKS/混合入站**启用 UDP 并应用设置。TCP 测速只验证 TCP；SOCKS5 的 UDP ASSOCIATE 返回状态码 7 时，监听器拒绝了 UDP 转发请求。
 2. 先启动 v2rayN，使用 Xray 核心并确认本机 mixed/SOCKS 代理 1081 可用。双击 `guard-console.pyw`，或运行 `python -X utf8 guard-console.pyw`。首次选择包含 `v2rayN.exe`、`bin/Xray/xray.exe` 和 `binConfigs/config.json` 的安装目录。
 3. 点「开启保护并启动 TUN」，批准 Windows 管理员提示。规则先安装，随后启动 TUN 并等待 WFP 确认新接口。点「停止 TUN」后物理出站保护继续生效；需要恢复正常 Windows 出站时再点「关闭保护」。关闭窗口后后台保护可以继续运行。
 4. 通过「最近 20 个 TUN 目标」和「TUN 工作日志」核对连接。显式走 1081 的流量可能完全绕过 TUN 采样。故障时可重新打开控制台操作开关；会话状态和日志位于当前用户的 `%LOCALAPPDATA%\v2rayn-tun-controller`。
