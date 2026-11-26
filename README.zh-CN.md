@@ -38,3 +38,8 @@ flowchart LR
 ## 当前验证范围
 
 在 Windows 手机热点环境下，出站保护与 TUN 同时开启时，已抓到 DHCP 请求和服务器回复，系统租约到期时间随之延后。两台 SSH 主机均完成新连接认证，Codex 已登录会话收到真实模型回复。观察时段、抓包结果及未覆盖场景见 [RC2 验证记录](docs/release-v0.3.4-rc.2.md)。
+
+## 相关项目
+
+- [managed-tun](https://github.com/seanzhang9999/managed-tun) — macOS 对应实现：v2rayN 之下的独立 sing-box TUN，
+  用「事实 → 证据 → 诊断 → 动作」的可解释判据层定位故障，而不是靠状态字段反推。

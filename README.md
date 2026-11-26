@@ -27,3 +27,9 @@ TUN uses fake-IP DNS and proxied DoH. When the physical egress helper needs a re
 ## Verification
 
 On a Windows laptop connected to a Wi-Fi hotspot, the DHCP server renewed the lease while WFP and TUN were both active. Two SSH hosts authenticated through the tunnel. An authenticated Codex request also completed. See the [RC2 validation notes](docs/release-v0.3.4-rc.2.md) for the observation interval and limits. Public IPv6 forwarding, sleep/wake recovery and a fresh Antigravity browser login remain unverified.
+
+## Related
+
+- [managed-tun](https://github.com/seanzhang9999/managed-tun) — the macOS counterpart: a standalone
+  sing-box TUN beneath v2rayN with an explainable judgement layer (facts → evidence → diagnosis →
+  action), so failures are named and repaired by conclusion instead of being inferred from status flags.
