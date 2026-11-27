@@ -188,6 +188,9 @@ if ($Action -eq 'Start') {
             }
             if ($status.state -eq 'failed') {
                 Write-Host (('Start failed safely at: {0}' -f $status.errorCheckpoint))
+                # The reason decides what the user does next; a bare checkpoint hides
+                # cases such as a watchdog stop that nothing will restart on its own.
+                if ($status.errorMessage) { Write-Host (('Reason: {0}' -f $status.errorMessage)) }
                 exit 2
             }
         }

@@ -31,6 +31,12 @@ CONTROLLER_PORT = 19092
 WATCHDOG_REPORT_NAME = "mihomo-runtime-watchdog-report.json"
 FAILURE_HISTORY_NAME = "mihomo-failure-history.json"
 FAILURE_HISTORY_LIMIT = 20
+# 0 disables the watchdog's lifetime cap. The guard exists to stop a core whose
+# supervisor stopped proving it is alive; it must never end a healthy core, and a
+# cap of 86400 s used to do exactly that once a day with nothing left to restart it.
+WATCHDOG_LIFETIME_SECONDS = 0
+# A guard that dies immediately after respawn must not become a spawn loop.
+WATCHDOG_RENEW_DELAY_SECONDS = 2.0
 
 
 class SupervisorError(RuntimeError):
@@ -63,11 +69,14 @@ def describe_core_exit(return_code: int, reason: str) -> str:
     if reason == "watchdog-heartbeat-timeout":
         return (
             "看门狗检测到控制程序心跳持续中断，已安全停止 Mihomo 核心"
-            "（可能发生于系统睡眠或唤醒后恢复较慢；退出代码 "
-            f"{return_code}）"
+            "（可能发生于系统睡眠或唤醒后恢复较慢；watchdog-heartbeat-timeout，"
+            f"退出代码 {return_code}）"
         )
     if reason == "watchdog-forced-stop":
-        return f"看门狗已停止 Mihomo 核心（退出代码 {return_code}）"
+        return (
+            f"看门狗已停止 Mihomo 核心（watchdog-forced-stop，退出代码 {return_code}）；"
+            "核心不会自动重启，请在控制台点击 Restart"
+        )
     if reason == "core-clean-exit":
         return "Mihomo 核心意外提前退出（退出代码 0）"
     return f"Mihomo 核心异常退出（退出代码 {return_code}）"
@@ -240,6 +249,10 @@ class MihomoSupervisor:
                     return_code, watchdog_report
                 )
                 raise SupervisorError(describe_core_exit(return_code, self.last_core_exit_reason))
+            if self.watchdog is not None and self.watchdog.poll() is not None:
+                # The core is still alive but its orphan guard is gone. Renew the
+                # guard; never stop the core for it, and never leave it unwatched.
+                self._renew_watchdog()
             if not self.manage_v2rayn:
                 relay = self.physical_egress
                 if relay and (relay.process is None or relay.process.poll() is not None):
@@ -385,6 +398,54 @@ class MihomoSupervisor:
             },
         )
 
+    def _watchdog_args(self) -> list[str]:
+        """Arguments for the orphan guard that watches the core just started."""
+        return [
+            "powershell.exe",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(self.script_root / "tun-watchdog.ps1"),
+            "-StateFilePath",
+            str(self.state_path),
+            "-StartupGuardSeconds",
+            "45",
+            "-TimeoutSeconds",
+            str(WATCHDOG_LIFETIME_SECONDS),
+            "-HeartbeatFilePath",
+            str(self.heartbeat_path),
+            "-HeartbeatStaleSeconds",
+            "20",
+            "-HeartbeatConfirmSeconds",
+            "30",
+            "-CancelFilePath",
+            str(self.cancel_path),
+            "-ReportFileName",
+            WATCHDOG_REPORT_NAME,
+        ]
+
+    def _start_watchdog(self) -> None:
+        self.watchdog = subprocess.Popen(
+            self._watchdog_args(), creationflags=CREATE_NO_WINDOW
+        )
+
+    def _renew_watchdog(self) -> None:
+        """Replace a guard that exited while its core is still running.
+
+        The guard is disposable on purpose: it may rotate at its own lifetime
+        boundary or die unexpectedly, and the supervisor simply starts another
+        one against the same state file instead of losing the orphan check.
+        """
+        report = _read_json(self.watchdog_report_path)
+        self._write_status(
+            "running",
+            "watchdog-renewed",
+            watchdog_reason=(report or {}).get("reason"),
+        )
+        time.sleep(WATCHDOG_RENEW_DELAY_SECONDS)
+        self._start_watchdog()
+
     def _start_core(self) -> None:
         for path in (
             self.state_path,
@@ -398,33 +459,7 @@ class MihomoSupervisor:
         self.last_core_exit_code = None
         self.last_core_exit_reason = None
         self._touch_heartbeat()
-        self.watchdog = subprocess.Popen(
-            [
-                "powershell.exe",
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                str(self.script_root / "tun-watchdog.ps1"),
-                "-StateFilePath",
-                str(self.state_path),
-                "-StartupGuardSeconds",
-                "45",
-                "-TimeoutSeconds",
-                "86400",
-                "-HeartbeatFilePath",
-                str(self.heartbeat_path),
-                "-HeartbeatStaleSeconds",
-                "20",
-                "-HeartbeatConfirmSeconds",
-                "30",
-                "-CancelFilePath",
-                str(self.cancel_path),
-                "-ReportFileName",
-                WATCHDOG_REPORT_NAME,
-            ],
-            creationflags=CREATE_NO_WINDOW,
-        )
+        self._start_watchdog()
         self._stdout = self.stdout_path.open("wb")
         self._stderr = self.stderr_path.open("wb")
         self.core = subprocess.Popen(
@@ -657,6 +692,7 @@ if ($owner) {
         error_checkpoint: str | None = None,
         error_message: str | None = None,
         error_check: str | None = None,
+        watchdog_reason: str | None = None,
     ) -> None:
         value: dict[str, Any] = {
             "schemaVersion": 1,
@@ -681,6 +717,8 @@ if ($owner) {
             value["errorMessage"] = error_message
         if error_check is not None:
             value["errorCheck"] = error_check
+        if watchdog_reason is not None:
+            value["watchdogReason"] = watchdog_reason
         if self.last_core_exit_code is not None:
             value["coreExitCode"] = self.last_core_exit_code
         if self.last_core_exit_reason is not None:

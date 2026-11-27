@@ -174,6 +174,38 @@ class MihomoDailyControllerTests(unittest.TestCase):
         self.assertIn("心跳持续中断", message)
         self.assertIn("睡眠或唤醒", message)
 
+    def test_forced_stop_message_names_the_reason_and_the_way_out(self):
+        message = describe_core_exit(-1, "watchdog-forced-stop")
+        self.assertIn("watchdog-forced-stop", message)
+        self.assertIn("Restart", message)
+
+    def test_watchdog_starts_without_a_lifetime_cap(self):
+        # A cap used to end a healthy core after 24 h with nothing to restart it.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            supervisor = MihomoSupervisor(root, root, PROJECT_ROOT)
+            args = supervisor._watchdog_args()
+
+        value = args[args.index("-TimeoutSeconds") + 1]
+        self.assertEqual(value, "0")
+        self.assertNotIn("86400", args)
+
+    def test_watchdog_reports_a_renewal_instead_of_killing_a_live_core(self):
+        text = (PROJECT_ROOT / "tun-watchdog.ps1").read_text(encoding="utf-8-sig")
+        self.assertIn("[int]$TimeoutSeconds = 0", text)
+        self.assertIn("$lifetimeExpired", text)
+        self.assertIn("lifetime-expired", text)
+        self.assertIn("coreStillRunning", text)
+        # Expiry must not fall into the stop branch.
+        self.assertIn("-not $lifetimeExpired -and $coreRunning", text)
+
+    def test_supervisor_renews_a_watchdog_that_exits_early(self):
+        text = (
+            PROJECT_ROOT / "src/tun_controller/mihomo_supervisor.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("_renew_watchdog", text)
+        self.assertIn("self.watchdog.poll() is not None", text)
+
     def test_watchdog_requires_continuous_stale_confirmation(self):
         text = (PROJECT_ROOT / "tun-watchdog.ps1").read_text(encoding="utf-8-sig")
         self.assertIn("HeartbeatConfirmSeconds", text)
