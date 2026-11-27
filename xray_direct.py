@@ -20,15 +20,37 @@ def direct_rules(path):
     return rules
 
 
+# Keys that constrain the destination only. Xray evaluates one field rule as OR
+# inside an attribute and AND across attributes, so `{domain:[...], ip:[...]}`
+# means "domain or ip": the ip half still sends those addresses out directly.
+# Requiring the rule to consist of nothing but {type, outboundTag, ip} discarded
+# every rule v2rayN actually ships, leaving the permit list empty while the
+# default action kept blocking the physical egress.
+DESTINATION_KEYS = frozenset({'type', 'outboundTag', 'ip', 'domain', 'port', 'network'})
+
+
+def direct_items(rule):
+    """Return the raw `ip` entries of a rule whose matches leave directly.
+
+    Rules narrowed by anything other than the destination (`source`,
+    `inboundTag`, `user`, `protocol`, `attributes`) are skipped: turning a
+    conditional permit into a blanket one would trade a blocked connection for
+    a silent leak.
+    """
+    if rule.get('type', 'field') != 'field':
+        return ()
+    if set(rule) - DESTINATION_KEYS:
+        return ()
+    items = rule.get('ip')
+    return tuple(items) if isinstance(items, list) else ()
+
+
 def literal_targets(rule):
-    if (set(rule) - {'type', 'outboundTag', 'ip'} or rule.get('type') != 'field'
-            or not isinstance(rule.get('ip'), list)):
-        return set()
     result = set()
-    for item in rule['ip']:
+    for item in direct_items(rule):
         try:
             result.add(ipaddress.ip_address(item))
-        except ValueError:
+        except (AttributeError, ValueError):
             continue
     return result
 
@@ -115,9 +137,7 @@ def _cn_networks(path, mtime, size):
 def direct_networks(path):
     networks = set()
     for _, rule in direct_rules(path):
-        if set(rule) - {'type','outboundTag','ip'} or rule.get('type') != 'field':
-            continue
-        for item in rule.get('ip', []):
+        for item in direct_items(rule):
             if item.lower() == 'geoip:cn':
                 db = path.parents[1] / 'bin' / 'geoip.dat'
                 st = db.stat()
@@ -125,7 +145,7 @@ def direct_networks(path):
             else:
                 try:
                     network = ipaddress.ip_network(item)
-                except ValueError:
+                except (AttributeError, ValueError):
                     continue
                 if network.prefixlen:
                     networks.add(network)
