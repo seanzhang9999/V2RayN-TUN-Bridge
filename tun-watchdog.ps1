@@ -2,7 +2,10 @@
 param(
     [Parameter(Mandatory)] [string]$StateFilePath,
     [int]$StartupGuardSeconds = 45,
-    [int]$TimeoutSeconds = 86400,
+    # 0 (default) means no lifetime cap. A positive value is a renewal window, not a
+    # death sentence: on expiry the guard exits and the supervisor starts a new one,
+    # while the core keeps running.
+    [int]$TimeoutSeconds = 0,
     [Parameter(Mandatory)] [string]$HeartbeatFilePath,
     [int]$HeartbeatStaleSeconds = 20,
     [int]$HeartbeatConfirmSeconds = 30,
@@ -53,8 +56,9 @@ do {
 
 $cancelled = Test-Path -LiteralPath $CancelFilePath
 $heartbeatExpired = $false
+$lifetimeExpired = $false
 $staleObservedAt = $null
-$deadline = [DateTimeOffset]::UtcNow.AddSeconds($TimeoutSeconds)
+$deadline = if ($TimeoutSeconds -gt 0) { [DateTimeOffset]::UtcNow.AddSeconds($TimeoutSeconds) } else { $null }
 while ($state -and -not $cancelled -and (Test-ExactProcess -State $state)) {
     if (Test-Path -LiteralPath $CancelFilePath) {
         $cancelled = $true
@@ -73,25 +77,44 @@ while ($state -and -not $cancelled -and (Test-ExactProcess -State $state)) {
         $heartbeatExpired = $true
         break
     }
-    if ($now -ge $deadline) { break }
+    if ($deadline -and $now -ge $deadline) {
+        $lifetimeExpired = $true
+        break
+    }
     Start-Sleep -Milliseconds 300
 }
 
+$coreRunning = [bool](Test-ExactProcess -State $state)
 $forcedStop = $false
-if (-not $cancelled -and (Test-ExactProcess -State $state)) {
+if (-not $cancelled -and -not $lifetimeExpired -and $coreRunning) {
+    # Stop only an orphaned core: one whose supervisor stopped proving it is alive.
     Stop-Process -Id ([int]$state.pid) -Force -ErrorAction SilentlyContinue
     $forcedStop = $true
+    $coreRunning = $false
 }
-Remove-Item -LiteralPath (Join-Path $runtimeRoot 'mihomo-controller-access.json') -Force -ErrorAction SilentlyContinue
+if ($forcedStop -or ($state -and -not $coreRunning)) {
+    # Only withdraw the credentials once the core they describe is gone. A renewal
+    # leaves a running core behind, and a guard that never attached knows nothing.
+    Remove-Item -LiteralPath (Join-Path $runtimeRoot 'mihomo-controller-access.json') -Force -ErrorAction SilentlyContinue
+}
 
-[ordered]@{
+$report = [ordered]@{
     startedAt = $startedAt.ToString('o')
     finishedAt = [DateTimeOffset]::UtcNow.ToString('o')
     corePid = if ($state) { [int]$state.pid } else { $null }
     cancelled = $cancelled
     heartbeatExpired = $heartbeatExpired
+    lifetimeExpired = $lifetimeExpired
     staleConfirmationSeconds = $HeartbeatConfirmSeconds
     forcedStop = $forcedStop
-    reason = if ($heartbeatExpired) { 'heartbeat-timeout' } elseif ($forcedStop) { 'forced-stop' } elseif ($cancelled) { 'cancelled' } else { 'core-exited' }
-} | ConvertTo-Json | Set-Content -LiteralPath $reportPath -Encoding utf8
+    coreStillRunning = $coreRunning
+    reason = if ($heartbeatExpired) { 'heartbeat-timeout' } elseif ($lifetimeExpired) { 'lifetime-expired' } elseif ($forcedStop) { 'forced-stop' } elseif ($cancelled) { 'cancelled' } else { 'core-exited' }
+}
+if ($lifetimeExpired -and $coreRunning) {
+    # Renewal, not termination: leave no verdict behind for a core that is still up,
+    # otherwise a later exit would inherit this stale report.
+    Remove-Item -LiteralPath $reportPath -Force -ErrorAction SilentlyContinue
+} else {
+    $report | ConvertTo-Json | Set-Content -LiteralPath $reportPath -Encoding utf8
+}
 exit 0
