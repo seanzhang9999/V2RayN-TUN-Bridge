@@ -52,19 +52,18 @@ def process_name(pid):
 
 
 def latest(history,connections):
-    tun=(x for x in connections if str((x.get('metadata') or {}).get('type','')).lower()=='tun')
-    # Coalesce parallel connections to one application/target before truncating.
-    newest={}
     owners=None
-    for x in tun:
-        m=x['metadata'];host=m.get('host') or m.get('destinationIP') or '未知'
-        key=(host,str(m.get('destinationPort','')),m.get('process') or m.get('processPath') or '',
-             str(m.get('network','')),str(m.get('sourcePort','')))
-        if key not in newest or x.get('start','')>newest[key].get('start',''):newest[key]=x
     names={}
-    for key,x in heapq.nlargest(200,newest.items(),key=lambda item:item[1].get('start','')):
-        host,port,proc,proto,source=key
-        name=PureWindowsPath(proc).name if proc else ''
+    counts={'其他应用':0,'Xray':0}
+    for x in connections:
+        m=x.get('metadata') or {}
+        if str(m.get('type','')).lower()!='tun':
+            continue
+        host=m.get('host') or m.get('destinationIP') or '未知'
+        port=str(m.get('destinationPort',''))
+        proto=str(m.get('network',''))
+        source=str(m.get('sourcePort',''))
+        name=PureWindowsPath(m.get('processPath') or m.get('process') or '').name
         if not name and source.isdigit():
             if owners is None:
                 try:
@@ -77,12 +76,22 @@ def latest(history,connections):
                 if pid not in names:names[pid]=process_name(pid)
                 name=names[pid]
         name=name or '未识别'
-        ident=(host,port,name,proto)
+        group='Xray' if name.casefold()=='xray.exe' else '其他应用'
+        counts[group]+=1
+        ident=(host,port,name.casefold(),proto)
         row=(x.get('start',''),name,host,port,proto,int(x.get('upload') or 0),int(x.get('download') or 0))
         if ident not in history or row[0]>=history[ident][0]:history[ident]=row
-    rows=sorted(history.items(),key=lambda i:i[1][0],reverse=True)[:20]
-    history.clear();history.update(rows)
-    return [row for _,row in rows]
+    # Truncate each history separately so bursts from the core cannot evict apps.
+    rows={}
+    retained={}
+    for group in counts:
+        items=heapq.nlargest(20,((k,v) for k,v in history.items()
+                                 if (k[2]=='xray.exe')==(group=='Xray')),key=lambda item:item[1][0])
+        retained.update(items)
+        rows[group]=[row for _,row in items]
+    history.clear()
+    history.update(retained)
+    return rows,counts
 
 
 def tail(path):
@@ -102,7 +111,14 @@ class TunActivity:
         self.stop=threading.Event();self.update=queue.Queue(maxsize=1)
         self.page=ttk.Frame(tabs,padding=8);tabs.add(self.page,text='最近 20 个 TUN 目标')
         self.state=tk.StringVar(value='正在读取 Mihomo…')
-        ttk.Label(self.page,textvariable=self.state).pack(anchor='w')
+        bar=ttk.Frame(self.page)
+        bar.pack(fill='x')
+        self.group=tk.StringVar(value='其他应用')
+        self.rows={'其他应用':[],'Xray':[]}
+        for group in self.rows:
+            ttk.Radiobutton(bar,text=group,variable=self.group,value=group,
+                            command=self.show_group).pack(side='left',padx=(0,8))
+        ttk.Label(bar,textvariable=self.state).pack(side='left')
         self.table=ttk.Treeview(self.page,columns=('time','app','host','port','proto','up','down'),show='headings')
         for k,h,w in [('time','连接时间',85),('app','应用',150),('host','目标域名 / IP',275),('port','端口',60),('proto','协议',65),('up','上传 B',85),('down','下载 B',85)]:
             self.table.heading(k,text=h);self.table.column(k,width=w,stretch=k in ('app','host'))
@@ -129,9 +145,8 @@ class TunActivity:
                 with opener.open(req,timeout=3) as resp:data=resp.read(40*1024*1024+1)
                 if len(data)>40*1024*1024:raise ValueError('连接快照超过 40 MB，已限制刷新')
                 connections=json.loads(data)['connections'] or []
-                rows=latest(history,connections)
-                count=sum(x.get('metadata',{}).get('type','').lower()=='tun' for x in connections)
-                state=f'当前 {count} 条 TUN 连接 · 按最近连接时间排序 · 相同应用和目标合并'
+                rows,counts=latest(history,connections)
+                state=f"当前连接：其他应用 {counts['其他应用']} 条 · Xray {counts['Xray']} 条"
                 if len(connections)>3000:delay=15
             except FileNotFoundError:state='当前没有 TUN 监控接口 · 保留本窗口本次观测记录'
             except (OSError,ValueError,KeyError,TypeError) as exc:
@@ -145,11 +160,8 @@ class TunActivity:
         if not self.update.empty():
             state,rows=self.update.get_nowait();self.state.set(state)
             if rows is not None:
-                self.table.delete(*self.table.get_children())
-                for stamp,*row in rows:
-                    try:stamp=datetime.datetime.fromisoformat(stamp).astimezone().strftime('%H:%M:%S')
-                    except ValueError:pass
-                    self.table.insert('','end',values=[stamp,*row])
+                self.rows=rows
+                self.show_group()
         if self.tabs.select()==str(self.logs):
             try:value=tail(ROOT/LOGS[self.which.get()])
             except OSError as exc:value=str(exc)
@@ -157,3 +169,10 @@ class TunActivity:
                 self.previous=value;self.text.configure(state='normal');self.text.delete('1.0','end')
                 self.text.insert('end',value);self.text.see('end');self.text.configure(state='disabled')
         self.page.after(750,self.tick)
+
+    def show_group(self):
+        self.table.delete(*self.table.get_children())
+        for stamp,*row in self.rows[self.group.get()]:
+            try:stamp=datetime.datetime.fromisoformat(stamp).astimezone().strftime('%H:%M:%S')
+            except ValueError:pass
+            self.table.insert('','end',values=[stamp,*row])

@@ -83,6 +83,9 @@ def grouped_rules(rows):
 
 import guard_live
 from local_panel import AccessPanel
+from local_access import ROOT, read
+sys.path.insert(0, str(HERE / 'src'))
+from tun_controller.network_monitor import windows_physical_routes
 
 
 def launch_guard(action):
@@ -139,6 +142,21 @@ class Console:
         self.on.pack(side='right',padx=8)
         ttk.Button(header,text='停止 TUN',command=lambda:self.control('tun-off')).pack(side='right')
         ttk.Button(header,text='开启保护并启动 TUN',command=lambda:self.control('tun-on')).pack(side='right',padx=8)
+        bar = ttk.Frame(body)
+        bar.pack(fill='x', pady=(0, 6))
+        ttk.Label(bar, text='TUN 物理出口').pack(side='left')
+        self.choice_file = ROOT / 'physical-choice.json'
+        self.saved = read(self.choice_file)
+        self.route_options = {'自动选择': ''}
+        self.route_box = ttk.Combobox(bar, state='readonly', width=32)
+        self.route_box.pack(side='left', padx=6)
+        self.route_refresh = ttk.Button(bar, text='刷新列表', command=self.load_routes)
+        self.route_refresh.pack(side='left')
+        self.apply_route = ttk.Button(bar, text='应用', command=self.save_route)
+        self.apply_route.pack(side='left')
+        self.bound = tk.StringVar(value='当前出口：读取中')
+        ttk.Label(bar, textvariable=self.bound).pack(side='left', padx=8)
+        self.load_routes()
         self.guard_status = tk.StringVar(value='正在读取 Windows 保护状态…')
         ttk.Label(body,textvariable=self.guard_status,font=('Microsoft YaHei UI',12,'bold')).pack(anchor='w')
         ttk.Label(body, textvariable=self.status).pack(anchor='w')
@@ -148,6 +166,8 @@ class Console:
         logs = ttk.Frame(tabs, padding=8)
         from tun_activity import TunActivity
         self.activity=TunActivity(tabs)
+        from bridge_monitor import MonitorPanel
+        self.network_monitor=MonitorPanel(tabs)
         tabs.add(rules, text='Xray 直连规则')
         self.access=AccessPanel(tabs,self.launch_async)
         tabs.add(self.access.frame,text='局域网与 Wi-Fi 登录')
@@ -177,6 +197,38 @@ class Console:
         threading.Thread(target=self.observe,daemon=True).start()
         self.root.after(2000, self.poll_rules)
         self.root.after(150, self.poll_log)
+
+    def load_routes(self):
+        self.route_refresh.configure(state='disabled')
+        self.apply_route.configure(state='disabled')
+        def scan():
+            try:
+                self.events.put(('routes', windows_physical_routes()))
+            except Exception as exc:
+                self.events.put(('route-error', str(exc)))
+        threading.Thread(target=scan, daemon=True).start()
+
+    def save_route(self):
+        label = self.route_box.get()
+        if label not in self.route_options:
+            return
+        guid = self.route_options[label]
+        active = bool(guard_live.tun_luid())
+        if active and not messagebox.askokcancel('切换物理出口', '应用此选择会重启 TUN，当前连接可能短暂中断。继续？'):
+            return
+        choice = {'guid': guid, 'label': label}
+        try:
+            self.choice_file.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.choice_file.with_suffix('.tmp')
+            tmp.write_text(json.dumps(choice, ensure_ascii=False), encoding='utf8')
+            tmp.replace(self.choice_file)
+        except OSError as exc:
+            self.status.set(str(exc))
+            return
+        self.saved = choice
+        if active:
+            self.launch_async('switch-egress')
+        self.status.set('已保存，正在切换出口' if active else '已保存，将在启动 TUN 时使用')
 
     def poll_rules(self):
         self.refresh()
@@ -216,6 +268,10 @@ class Console:
             except OSError as exc:
                 state=guard_live.recent_status()
                 text=(state or '当前权限无法读取实时保护状态')+'    ·    '+('TUN 网卡已创建' if guard_live.tun_luid() else 'TUN 网卡未启动')
+            runtime = read(ROOT / 'mihomo-runtime-report.json')
+            bound = (runtime.get('boundInterface') or runtime.get('physicalInterface') or '待确认'
+                     if runtime.get('state') == 'running' and guard_live.tun_luid() else '未启用或待确认')
+            self.events.put(('bound', bound))
             self.events.put(('status',text))
             try:
                 stamp=guard_live.STATE.stat().st_mtime_ns
@@ -250,7 +306,24 @@ class Console:
     def poll_log(self):
         while not self.events.empty():
             kind, value = self.events.get()
-            if kind=='status':
+            if kind == 'bound':
+                self.bound.set('当前出口：' + value)
+            elif kind in ('routes', 'route-error'):
+                self.route_refresh.configure(state='normal')
+                if kind == 'route-error':
+                    self.status.set('无法读取物理网卡：' + value)
+                    continue
+                self.route_options = {'自动选择': ''}
+                for route in value:
+                    label = f"{route['interfaceName']} · {route['localIPv4']}"
+                    self.route_options[label] = route['guid']
+                labels = list(self.route_options)
+                selected = next((k for k,v in self.route_options.items()
+                                 if v == self.saved.get('guid', '')), None)
+                self.route_box.configure(values=labels)
+                self.route_box.set(selected or ('不可用：' + self.saved.get('label', '')))
+                self.apply_route.configure(state='normal')
+            elif kind=='status':
                 self.guard_status.set(value)
             else:
                 self.status.set(value.strip())

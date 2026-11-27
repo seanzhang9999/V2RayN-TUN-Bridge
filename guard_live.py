@@ -10,7 +10,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from xray_direct import config_path, direct_networks, verify_core
+from xray_direct import config_path, direct_filter_targets as direct_networks, verify_core
 
 HERE = Path(__file__).resolve().parent
 source = HERE / '限时出站保护.py'
@@ -249,16 +249,25 @@ def acknowledge():
         save(STATE.with_name('guard-ready.json'),{'token':sys.argv[2]})
 
 
-def activate(handle):
+def activate(handle, *, for_tun=False):
     # The mutex lives until the watcher exits, including across GUI restarts.
     kernel=c.windll.kernel32
     kernel.CreateMutexW.restype=ptr
     mutex=kernel.CreateMutexW(None,False,'Global\\V2RayNTunBridgeGuardWatcherV1')
     if not mutex:
         raise c.WinError()
+    monitor_stop = None
     try:
         if kernel.WaitForSingleObject(ptr(mutex),2000) not in (0,128):
             if installed(handle):
+                if for_tun:
+                    from local_access import read
+                    _, host, transport = g['read_node_details']()
+                    status = read(STATE.with_name('guard-heartbeat.json'))
+                    if not (status.get('on') and 0 <= time.time()-status.get('at', 0) <= 30
+                            and status.get('host') == host and status.get('port') == transport[0]
+                            and status.get('addresses')):
+                        raise RuntimeError('已有保护正在运行，尚未确认当前节点；保留保护，取消启动 TUN')
                 report('保护已开启')
                 acknowledge()
                 return
@@ -272,7 +281,11 @@ def activate(handle):
                 core=candidate
                 networks=direct_networks(config_path())
                 addresses=g['resolve_node'](host,retries=1)
-            except (OSError, ValueError, RuntimeError, KeyError, TypeError):
+                if for_tun and g['read_node_details']() != (core, host, transport):
+                    raise ValueError('准备期间 v2rayN 已切换节点')
+            except (OSError, ValueError, RuntimeError, KeyError, TypeError, subprocess.SubprocessError) as exc:
+                if for_tun:
+                    raise RuntimeError(f'启动预检失败，未安装本次保护规则：{exc}') from exc
                 # Keep protection and captive login available before VPN connectivity exists.
                 addresses=[]
             next_identity_check=0
@@ -281,8 +294,14 @@ def activate(handle):
             tun_filters = install(handle,core,addresses,transport,networks,interface,dhcp_interfaces=dhcp_interfaces)
             report('保护已开启 · IPv4 / IPv6')
             record_status(True, host, transport, addresses, interface)
+            try:
+                from bridge_monitor import start
+                monitor_stop = start(sys.modules[__name__])
+            except (ImportError, OSError, RuntimeError) as exc:
+                if sys.stderr is not None:
+                    print(f'网络监控启动失败：{exc}', file=sys.stderr, flush=True)
             acknowledge()
-            import local_access, subprocess
+            import local_access
             if local_access.read(local_access.LAN_OPTIONS):
                 subprocess.Popen([str(Path(sys.executable).with_name('pythonw.exe')),
                                   str(Path(__file__).resolve()),'local'],
@@ -332,12 +351,17 @@ def activate(handle):
                 record_status(True, host, transport, addresses, interface)
                 report('保护已开启 · TUN 接口已放行' if interface else '保护已开启 · TUN 接口已移除')
     finally:
+        if monitor_stop is not None:
+            monitor_stop.set()
         kernel.CloseHandle(ptr(mutex))
 
 
 def tun_control(start):
     import subprocess
     from local_access import ROOT
+    if not start:
+        from bridge_monitor import preserve_on_stop
+        preserve_on_stop('停止 TUN')
     repo=HERE
     ps=Path(os.environ['SystemRoot'])/'System32/WindowsPowerShell/v1.0/powershell.exe'
     if start:
@@ -347,7 +371,7 @@ def tun_control(start):
             token=os.urandom(12).hex()
             with (ROOT/'tun-commands.log').open('ab', buffering=0) as log:
                 log.write(f'\n[{time.strftime("%Y-%m-%d %H:%M:%S")}] 保护初始化\n'.encode())
-                proc=subprocess.Popen([str(python),'-X','utf8',str(Path(__file__).resolve()),'on',token],
+                proc=subprocess.Popen([str(python),'-X','utf8',str(Path(__file__).resolve()),'prepare-tun',token],
                                       stdout=subprocess.DEVNULL,stderr=log,
                                       creationflags=subprocess.CREATE_NO_WINDOW)
             end=time.monotonic()+90
@@ -377,6 +401,9 @@ def tun_control(start):
             environment = os.environ.copy()
             if start:
                 environment['TUN_BRIDGE_GUARDED_START'] = '1'
+                preference = ROOT / 'physical-choice.json'
+                environment['TUN_BRIDGE_PHYSICAL_GUID'] = (
+                    json.loads(preference.read_text(encoding='utf8'))['guid'] if preference.exists() else '')
             result=subprocess.run(args,stdout=log,stderr=subprocess.STDOUT,timeout=125,env=environment,
                                   creationflags=subprocess.CREATE_NO_WINDOW)
         except (subprocess.TimeoutExpired,OSError) as exc:
@@ -398,6 +425,12 @@ def tun_control(start):
 
 def main(action):
     import local_access as local
+    if action == 'switch-egress':
+        with engine() as handle:
+            if not installed(handle):
+                raise RuntimeError('切换前请先开启出站保护')
+        tun_control(False)
+        return tun_control(True)
     if action in ('tun-on','tun-off'):
         return tun_control(action=='tun-on')
     if action=='local':
@@ -407,6 +440,8 @@ def main(action):
         return local.watch_link(sys.modules[__name__])
     with engine() as handle:
         if action=='off':
+            from bridge_monitor import preserve_on_stop
+            preserve_on_stop('关闭保护')
             local.save(local.PORTAL,{})
             local.save(local.ROOT/'link-stop.json',{'time':time.time()})
             deadline=time.monotonic()+15
@@ -416,8 +451,8 @@ def main(action):
                 clear(handle)
             record_status(False)
             report('保护已关闭')
-        elif action=='on':
-            activate(handle)
+        elif action in ('on', 'prepare-tun'):
+            activate(handle, for_tun=action=='prepare-tun')
         else:
             print('on' if installed(handle) else 'off')
 

@@ -156,6 +156,16 @@ if ($Action -eq 'Start') {
     Move-PreviousDiagnostic -Path $SupervisorStdout
     Move-PreviousDiagnostic -Path $SupervisorStderr
     Remove-Item -LiteralPath $StopRequestPath -Force -ErrorAction SilentlyContinue
+    # Inventory is informational. A running client or virtual NIC alone does not prove interference.
+    try {
+        $candidates = [Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces() |
+            Where-Object { ($_.Name + ' ' + $_.Description) -match 'vgate|wintun|wireguard|tailscale|zerotier|openvpn|tap-windows|mihomo|sing.?box|clash' }
+        foreach ($nic in $candidates) {
+            Write-Host ("[TUN inventory] Adapter: {0}; {1}; {2}" -f $nic.Name,$nic.Description,$nic.OperationalStatus)
+        }
+        Get-Process | Where-Object { $_.ProcessName -match 'oppo|oplus|heytap|wireguard|tailscale|zerotier|openvpn|clash|mihomo|sing-box' } |
+            ForEach-Object { Write-Host ("[TUN inventory] Process: {0} PID={1}" -f $_.ProcessName,$_.Id) }
+    } catch { Write-Host '[TUN inventory] Inventory incomplete.' }
     Write-Host '[1/3] Reading the selected v2rayN node and physical network...'
     $arguments = @(
         '--runtime-root', ('"{0}"' -f $RuntimeRoot),

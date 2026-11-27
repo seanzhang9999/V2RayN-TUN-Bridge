@@ -201,13 +201,19 @@ def detect_network_signature(
 
 
 def read_windows_physical_default_route() -> dict[str, Any] | None:
-    """Read the best non-TUN IPv4 default route without changing system state."""
+    preferred = os.environ.get("TUN_BRIDGE_PHYSICAL_GUID", "").casefold()
+    return next((route for route in windows_physical_routes()
+                 if not preferred or route["guid"].casefold() == preferred), None)
+
+
+def windows_physical_routes() -> list[dict[str, Any]]:
     script = r"""
 $ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
+$physical = @(Get-NetAdapter -Physical -ErrorAction Stop | Where-Object Status -eq 'Up')
 $rows = foreach ($route in @(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -PolicyStore ActiveStore)) {
-    if ($route.InterfaceAlias -like 'xray_tun*' -or
-        $route.InterfaceAlias -like 'singbox_tun*' -or
-        $route.InterfaceAlias -like 'mihomo_tun*') { continue }
+    $adapter = $physical | Where-Object ifIndex -eq $route.InterfaceIndex | Select-Object -First 1
+    if (-not $adapter) { continue }
     if ($route.NextHop -eq '0.0.0.0') { continue }
     $interface = Get-NetIPInterface -AddressFamily IPv4 -InterfaceIndex $route.InterfaceIndex -ErrorAction SilentlyContinue
     $address = Get-NetIPAddress -AddressFamily IPv4 -InterfaceIndex $route.InterfaceIndex -AddressState Preferred -ErrorAction SilentlyContinue |
@@ -215,6 +221,7 @@ $rows = foreach ($route in @(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix
         Select-Object -First 1
     if (-not $interface -or -not $address) { continue }
     [pscustomobject]@{
+        guid = [string]$adapter.InterfaceGuid
         interfaceIndex = [int]$route.InterfaceIndex
         interfaceName = [string]$route.InterfaceAlias
         localIPv4 = [string]$address.IPAddress
@@ -222,7 +229,7 @@ $rows = foreach ($route in @(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix
         routeMetric = [int]($route.RouteMetric + $interface.InterfaceMetric)
     }
 }
-$rows | Sort-Object routeMetric,interfaceIndex | Select-Object -First 1 | ConvertTo-Json -Compress
+ConvertTo-Json -InputObject @($rows | Sort-Object routeMetric,interfaceIndex) -Compress
 """
     environment = os.environ.copy()
     windows_root = PathLikeWindowsRoot(environment)
@@ -244,7 +251,7 @@ $rows | Sort-Object routeMetric,interfaceIndex | Select-Object -First 1 | Conver
     completed = subprocess.run(
         ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
         capture_output=True,
-        text=True,
+        encoding="utf-8-sig",
         timeout=12,
         check=False,
         env=environment,
@@ -253,12 +260,12 @@ $rows | Sort-Object routeMetric,interfaceIndex | Select-Object -First 1 | Conver
     if completed.returncode != 0:
         raise NetworkDetectionError("无法读取物理默认路由")
     if not completed.stdout.strip():
-        return None
+        return []
     try:
         value = json.loads(completed.stdout)
     except json.JSONDecodeError:
         raise NetworkDetectionError("无法解析物理默认路由") from None
-    return value if isinstance(value, dict) else None
+    return value if isinstance(value, list) else []
 
 
 def PathLikeWindowsRoot(environment: dict[str, str]) -> str:

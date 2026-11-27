@@ -132,16 +132,34 @@ class V6Mask(c.Structure):
     _fields_ = [('address', c.c_ubyte * 16), ('prefix', c.c_uint8)]
 
 
-def permit_network(engine, sub, app, net):
+class PortRange(c.Structure):
+    _fields_ = [('low', Value), ('high', Value)]
+
+
+def permit_network(engine, sub, app, target):
+    net, port, protocol = target
     if net.version == 4:
         mask = V4Mask(int(net.network_address), int(net.netmask))
         kind = 0x100
     else:
         mask = V6Mask((c.c_ubyte * 16).from_buffer_copy(net.network_address.packed), net.prefixlen)
         kind = 0x101
-    return add_filter(engine, sub, LAYERS[net.version == 6], 'Xray direct network', PERMIT, 13, [
+    conditions = [
         Condition(guid(APP), 0, Value(12, Data(pointer=app.value))),
-        Condition(guid(REMOTE), 0, Value(kind, Data(pointer=c.addressof(mask))))])
+        Condition(guid(REMOTE), 0, Value(kind, Data(pointer=c.addressof(mask))))]
+    if protocol is not None:
+        conditions.append(Condition(guid('3971ef2b-623e-4f9a-8cb1-6e79b806b9a7'),
+                                    0, Value(1, Data(number=protocol))))
+    if port is not None:
+        key = guid('c35a604d-d22b-4e1a-91b4-68f674ee674b')
+        low, high = port
+        if low == high:
+            conditions.append(Condition(key, 0, Value(2, Data(number=low))))
+        else:
+            bounds = PortRange(Value(2, Data(number=low)), Value(2, Data(number=high)))
+            conditions.append(Condition(key, 5, Value(0x102, Data(pointer=c.addressof(bounds)))))
+    return add_filter(engine, sub, LAYERS[net.version == 6], 'Xray direct network',
+                      PERMIT, 13, conditions)
 
 
 def sync_direct_filters(engine, sub, app, previous, targets):
@@ -164,7 +182,7 @@ def worker(exe, endpoints, seconds, watch_host, prepared, tun_luid=None, direct=
     direct_ids = {}
     applied = set()
     if direct:
-        from xray_direct import config_path, direct_networks
+        from xray_direct import config_path, direct_filter_targets
         path = config_path()
     session = Session()
     session.flags = 1  # FWPM_SESSION_FLAG_DYNAMIC
@@ -191,7 +209,7 @@ def worker(exe, endpoints, seconds, watch_host, prepared, tun_luid=None, direct=
             for label, action, weight, conditions in rules:
                 add_filter(engine, sub, layer, label, action, weight, conditions)
         if direct:
-            applied = direct_networks(path)
+            applied = direct_filter_targets(path)
             direct_ids = {net: permit_network(engine, sub, app, net) for net in applied}
         permits = [permit_endpoint(engine, sub, app, ip, transport) for ip in endpoints]
         call('FwpmTransactionCommit0', engine)
@@ -206,7 +224,7 @@ def worker(exe, endpoints, seconds, watch_host, prepared, tun_luid=None, direct=
             time.sleep(min(0.5, max(0, deadline - time.monotonic())))
             if direct and time.monotonic() < deadline:
                 try:
-                    targets = direct_networks(path)
+                    targets = direct_filter_targets(path)
                 except (OSError, KeyError, ValueError, TypeError):
                     targets = set()
                 if targets != applied:
@@ -404,32 +422,45 @@ def read_node():
     return core, host
 
 
+def query_endpoint(host, url):
+    curl = Path(os.environ['SystemRoot']) / 'System32' / 'curl.exe'
+    result = subprocess.run(
+        [str(curl), '--disable', '--fail', '--silent', '--show-error',
+         '--max-time', '4', '--noproxy', '', '--proxy', 'socks5h://127.0.0.1:1081',
+         '--header', 'Accept: application/dns-json', url + '?' + urlencode({'name': host, 'type': 'A'})],
+        capture_output=True, timeout=5)
+    if result.returncode:
+        detail = ('证书吊销服务离线' if b'0x80092013' in result.stderr.lower()
+                  else f'curl {result.returncode}')
+        raise ValueError(detail)
+    reply = json.loads(result.stdout)
+    if not isinstance(reply, dict) or reply.get('Status') != 0:
+        raise ValueError('DNS 应答失败')
+    addresses = sorted({ipaddress.IPv4Address(a['data']) for a in reply.get('Answer', [])
+                        if a['type'] == 1})
+    if not addresses or any(not ip.is_global or ip.is_multicast for ip in addresses):
+        raise ValueError('节点没有有效的公网 IPv4')
+    return addresses
+
+
 def resolve_node(host, retries=0):
     try:
         address = ipaddress.ip_address(host)
     except ValueError:
-        query = urlencode({'name': host, 'type': 'A'})
-        curl = Path(os.environ['SystemRoot']) / 'System32' / 'curl.exe'
-        for attempt in range(retries + 1):
-            try:
-                result = subprocess.run([str(curl), '--disable', '--fail', '--silent',
-                                         '--max-time', '3', '--noproxy', '', '--proxy',
-                                         'socks5h://127.0.0.1:1081',
-                                         'https://dns.google/resolve?' + query],
-                                        capture_output=True, check=True, timeout=4)
-                break
-            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-                transient = isinstance(exc, subprocess.TimeoutExpired) or exc.returncode == 28
-                if attempt == retries or not transient:
-                    raise ValueError(f'通过 1081 查询 {host} 失败，请检查代理连接') from None
-        reply = json.loads(result.stdout)
-        if reply.get('Status') != 0:
-            raise ValueError('Protected DNS lookup failed')
-        addresses = sorted({ipaddress.IPv4Address(a['data']) for a in
-                            reply.get('Answer', []) if a['type'] == 1})
+        for _ in range(retries + 1):
+            errors = []
+            for provider, url in (('Google', 'https://dns.google/resolve'),
+                                  ('Cloudflare', 'https://cloudflare-dns.com/dns-query')):
+                try:
+                    return query_endpoint(host, url)
+                except subprocess.TimeoutExpired:
+                    errors.append(f'{provider} 超时')
+                except (ValueError, KeyError, TypeError) as exc:
+                    errors.append(f'{provider} {exc}')
+        raise ValueError(f'通过 1081 查询 {host} 失败（{"，".join(errors)}）') from None
     else:
         addresses = [ipaddress.IPv4Address(address)]
-    if not addresses or any(not ip.is_global for ip in addresses):
+    if not addresses or any(not ip.is_global or ip.is_multicast for ip in addresses):
         raise ValueError('VPN endpoint did not resolve exclusively to public IPv4.')
     return addresses
 

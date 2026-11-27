@@ -11,14 +11,14 @@ import secrets
 import subprocess
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from tun_controller.ping_health import PingOutage, ping_connected, CHECK_INTERVAL
 from tun_controller.restart_consent import RestartConsent, session_locked
 from tun_controller.mihomo_prepare import prepare_mihomo_configs
-from tun_controller.physical_egress import PhysicalEgress
+from tun_controller.physical_egress import PhysicalEgress, endpoint_hosts
 from tun_controller.network_monitor import NetworkSignature, detect_network_signature
 from tun_controller.proxy_endpoint import guarded_proxy_ipv4, resolve_proxy_server_ipv4
 from tun_controller.v2rayn_source import DEFAULT_APP_ROOT, load_v2rayn_config
@@ -121,6 +121,7 @@ class SourceSnapshot:
     route_id: str
     gui_modified_ns: int
     database_modified_ns: int
+    endpoint_host: str = field(default="", repr=False)
 
 
 class MihomoSupervisor:
@@ -179,7 +180,8 @@ class MihomoSupervisor:
             snapshot = self._snapshot()
             if not self.manage_v2rayn and os.environ.get("TUN_BRIDGE_GUARDED_START") == "1":
                 self.checkpoint = "start-physical-egress"
-                self.physical_egress = PhysicalEgress(self.app_root, snapshot.network.interface_name)
+                hosts = endpoint_hosts(snapshot.endpoint_host, snapshot.network.proxy_ipv4)
+                self.physical_egress = PhysicalEgress(self.app_root, snapshot.network.interface_name, hosts)
                 self.physical_egress.start()
             self.checkpoint = "offline-prepare"
             self._prepare(snapshot.network)
@@ -349,6 +351,7 @@ class MihomoSupervisor:
             route_id=imported.route_id,
             gui_modified_ns=imported.gui_modified_ns,
             database_modified_ns=imported.database_modified_ns,
+            endpoint_host=imported.profile.address,
         )
 
     def _prepare(self, network: NetworkSignature) -> None:
@@ -671,6 +674,8 @@ if ($owner) {
             "healthChecks": self.health_checks,
             "selectedProfile": self.profile_summary,
         }
+        if self.physical_egress and state == "running":
+            value["boundInterface"] = self.physical_egress.interface
         if network is not None:
             value["physicalInterface"] = network.interface_name
         if error_type is not None:

@@ -35,13 +35,14 @@ def literal_targets(rule):
 
 def verify_core(exe):
     # Both the base listener and the v2rayN installation must identify this executable.
-    script = """
+    script = r"""
 $ErrorActionPreference='Stop'
-$owner=@(Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort 1081 -State Listen)
+$owner=@(& "$env:SystemRoot\System32\netstat.exe" -ano -p TCP |
+    ForEach-Object { if ($_ -match '^\s*TCP\s+127\.0\.0\.1:1081\s+0\.0\.0\.0:0\s+LISTENING\s+(\d+)\s*$') { [int]$Matches[1] } })
 if ($owner.Count -ne 1) {exit 1}
-$core=(Get-Process -Id $owner[0].OwningProcess).Path
+$core=(Get-Process -Id $owner[0]).Path
 $match=@(Get-Process -Name v2rayN | Where-Object {
-    $_.Path -and (Join-Path (Split-Path $_.Path) 'bin/Xray/xray.exe') -eq $core
+    $_.Path -and [IO.Path]::GetFullPath((Join-Path (Split-Path $_.Path) 'bin/Xray/xray.exe')) -eq $core
 })
 if (!$core -or !$match.Count) {exit 1}
 [Console]::OutputEncoding=[Text.Encoding]::UTF8
@@ -112,21 +113,60 @@ def _cn_networks(path, mtime, size):
     raise ValueError('Missing CN record in v2rayN GeoIP database')
 
 
-def direct_networks(path):
+def _rule_networks(path, rule):
     networks = set()
-    for _, rule in direct_rules(path):
-        if set(rule) - {'type','outboundTag','ip'} or rule.get('type') != 'field':
-            continue
-        for item in rule.get('ip', []):
-            if item.lower() == 'geoip:cn':
-                db = path.parents[1] / 'bin' / 'geoip.dat'
-                st = db.stat()
-                networks.update(_cn_networks(db, st.st_mtime_ns, st.st_size))
-            else:
-                try:
-                    network = ipaddress.ip_network(item)
-                except ValueError:
-                    continue
-                if network.prefixlen:
-                    networks.add(network)
+    for item in rule.get('ip', []):
+        if item.lower() == 'geoip:cn':
+            db = path.parents[1] / 'bin' / 'geoip.dat'
+            st = db.stat()
+            networks.update(_cn_networks(db, st.st_mtime_ns, st.st_size))
+        else:
+            try:
+                network = ipaddress.ip_network(item)
+            except ValueError:
+                continue
+            if network.prefixlen:
+                networks.add(network)
     return networks
+
+
+def _port_ranges(value):
+    ranges = []
+    for token in str(value).split(','):
+        bounds = token.strip().split('-')
+        if len(bounds) > 2 or any(not v.isascii() or not v.isdigit() for v in bounds):
+            return ()
+        low, high = int(bounds[0]), int(bounds[-1])
+        if not 1 <= low <= high <= 65535:
+            return ()
+        ranges.append((low, high))
+    return ranges
+
+
+def direct_filter_targets(path):
+    targets = set()
+    for _, rule in direct_rules(path):
+        if (rule.get('type') != 'field' or not isinstance(rule.get('ip'), list)
+                or set(rule) - {'type', 'outboundTag', 'ip', 'port', 'network'}):
+            continue
+        ports = _port_ranges(rule['port']) if 'port' in rule else [None]
+        protocols = [None]
+        if 'network' in rule:
+            names = str(rule['network']).lower().split(',')
+            numbers = {'tcp': 6, 'udp': 17}
+            if any(name.strip() not in numbers for name in names):
+                continue
+            protocols = [numbers[name.strip()] for name in names]
+        elif 'port' in rule:
+            protocols = [6, 17]
+        for net in _rule_networks(path, rule):
+            for port in ports:
+                for protocol in protocols:
+                    targets.add((net, port, protocol))
+    return targets
+
+
+def direct_networks(path):
+    # Observers using only destination addresses must ignore constrained permits.
+    return {net for net, port, protocol in direct_filter_targets(path)
+            if port is None and protocol is None}

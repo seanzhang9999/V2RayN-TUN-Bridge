@@ -15,7 +15,7 @@ RUNTIME = {
     "mihomo.exe": "82cd796a23492f43a71c1ec27e4e5e0b3d58932014da5a36e79ed9b11fee8162",
 }
 FILES = ("guard-console.pyw", "guard_live.py", "local_access.py", "local_panel.py",
-         "tun_activity.py", "xray_direct.py", "outbound-guard-trial.py", "tun-acceptance.py",
+         "tun_activity.py", "bridge_monitor.py", "xray_direct.py", "outbound-guard-trial.py", "tun-acceptance.py",
          "mihomo-tun.ps1", "tun-watchdog.ps1", "cleanup-tun.ps1", "PortalRelay.cs",
          "LICENSE", "README.md", "README.zh-CN.md", "THIRD_PARTY_NOTICES.md",
          "docs/release-v0.3.4-rc.2.md")

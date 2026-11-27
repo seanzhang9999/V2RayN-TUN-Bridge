@@ -24,6 +24,8 @@ TUN uses fake-IP DNS and proxied DoH. When the physical egress helper needs a re
 3. Select **开启保护并启动 TUN** to enable WFP and start TUN. Network changes request Windows administrator approval. **停止 TUN** stops only the tunnel. **关闭保护** removes Bridge protection to restore normal physical egress. Closing the console can leave protection active.
 4. Inspect recent TUN connections and command logs in the console. Runtime files are under `%LOCALAPPDATA%\v2rayn-tun-controller`. Wi-Fi LAN settings persist only when requested; captive-portal approvals are session-scoped.
 
+While protection is active the guard records network health every 15 seconds, even with the GUI closed. The five-minute view includes the physical link and DHCP lease, IPv4 packet counts to and from the VPN endpoint, a TLS probe bound to TUN, SOCKS HTTPS and UDP negotiation on 1081, the local DNS listener, and available Windows and core errors. Select a row for details. The rolling file is `network-last-5m.json` under `%LOCALAPPDATA%\v2rayn-tun-controller`. Saving an incident or stopping protection or TUN preserves a single replaceable `network-incident.json`.
+
 ## Verification
 
 On a Windows laptop connected to a Wi-Fi hotspot, the DHCP server renewed the lease while WFP and TUN were both active. Two SSH hosts authenticated through the tunnel. An authenticated Codex request also completed. See the [RC2 validation notes](docs/release-v0.3.4-rc.2.md) for the observation interval and limits. Public IPv6 forwarding, sleep/wake recovery and a fresh Antigravity browser login remain unverified.

@@ -65,13 +65,31 @@ class MihomoBuilderTests(unittest.TestCase):
     def test_guarded_tun_preserves_ssh_route_to_node_and_matches_only_xray(self):
         from types import SimpleNamespace
         relay = SimpleNamespace(exe=Path("C:/v2rayN/bin/Xray/xray.exe"), port=18000,
-                                identity="00000000-0000-4000-8000-000000000001")
+                                identity="00000000-0000-4000-8000-000000000001",
+                                hosts={"secret-server.example": ["203.0.113.52"]})
         cfg = build_mihomo_config(imported_config(), SIGNATURE, mode="full-ipv4-tun",
                                   use_local_upstream=True, physical_egress=relay)
         self.assertEqual(cfg["tun"]["route-exclude-address"], ["127.0.0.0/8"])
         self.assertEqual(cfg["rules"], [f"PROCESS-PATH,{relay.exe},XRAY-PHYSICAL", "MATCH,PROXY"])
         self.assertEqual(cfg["proxies"][0]["port"], 1081)
         self.assertEqual(cfg["proxies"][1]["uuid"], relay.identity)
+        self.assertEqual(cfg["hosts"], relay.hosts)
+        self.assertIn("secret-server.example", cfg["dns"]["fake-ip-filter"])
+        self.assertEqual(cfg["dns"]["nameserver"], ["https://1.1.1.1/dns-query#PROXY"])
+        relay.hosts = {"other.example": ["203.0.113.52"]}
+        with self.assertRaises(MihomoBuildError):
+            build_mihomo_config(imported_config(), SIGNATURE, mode="full-ipv4-tun",
+                                use_local_upstream=True, physical_egress=relay)
+
+    def test_only_exact_dns_names_are_pinned(self):
+        from tun_controller.physical_egress import endpoint_hosts
+        addresses = ("203.0.113.52", "203.0.113.53")
+        self.assertEqual(endpoint_hosts("NODE.example.", addresses),
+                         {"node.example": list(addresses)})
+        self.assertEqual(endpoint_hosts("203.0.113.52", addresses), {})
+        for invalid in ("*.example", "+.example", "bad,example", ""):
+            with self.assertRaises(ValueError):
+                endpoint_hosts(invalid, addresses)
 
     def test_local_socks_upstream_accepts_node_protocol_unknown_to_bridge(self):
         from dataclasses import replace

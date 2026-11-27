@@ -7,6 +7,7 @@ from typing import Any
 
 from tun_controller.models import ImportedConfig, RoutingRule, SelectedProfile
 from tun_controller.network_monitor import NetworkSignature
+from tun_controller.physical_egress import endpoint_hosts
 
 
 class MihomoBuildError(ValueError):
@@ -140,6 +141,13 @@ def build_mihomo_config(
         )
         config["dns"]["listen"] = "127.0.0.1:1053"
         if physical_egress:
+            hosts = endpoint_hosts(imported.profile.address, signature.proxy_ipv4)
+            if hosts != physical_egress.hosts:
+                raise MihomoBuildError("准备 TUN 期间节点发生变化，请重新启动 TUN")
+            if hosts:
+                config["hosts"] = hosts
+                config["dns"]["use-hosts"] = True
+                config["dns"]["fake-ip-filter"].extend(hosts)
             config["find-process-mode"] = "always"
             config["proxies"].append({
                 "name": "XRAY-PHYSICAL", "type": "vless", "server": "127.0.0.1",

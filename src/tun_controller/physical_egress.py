@@ -1,17 +1,35 @@
 """A loopback-only Xray outbound for sockets already routed by v2rayN."""
 import ctypes
+import ipaddress
 import json
+import re
 import socket
 import subprocess
 import time
 import uuid
 
 
+def endpoint_hosts(host, addresses):
+    """Pin only the exact server name resolved before enabling the TUN."""
+    host = host.strip().rstrip(".").encode("idna").decode("ascii").lower()
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        labels = host.split(".")
+        if len(host) > 253 or not all(
+            re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) for label in labels
+        ):
+            raise ValueError("VPN 节点域名无效") from None
+        return {host: list(addresses)}
+    return {}
+
+
 class PhysicalEgress:
-    def __init__(self, app_root, interface):
+    def __init__(self, app_root, interface, hosts):
         self.exe = (app_root / "bin/Xray/xray.exe").resolve(strict=True)
         self.identity = str(uuid.uuid4())
         self.interface = interface
+        self.hosts = hosts
         self.process = None
         self.job = None
         with socket.socket() as sock:
@@ -24,7 +42,8 @@ class PhysicalEgress:
                           "settings": {"decryption": "none", "clients": [{"id": self.identity}]}}],
             # A TUN fake-IP may have been converted back to a domain by Mihomo.
             # Resolve it through 1081; the OS resolver can return the fake-IP again.
-            "dns": {"tag": "egress-dns", "servers": ["https://1.1.1.1/dns-query"]},
+            "dns": {"tag": "egress-dns", "servers": ["https://1.1.1.1/dns-query"],
+                    "hosts": {f"full:{host}": ips for host, ips in self.hosts.items()}},
             "routing": {"rules": [{"type": "field", "inboundTag": ["egress-dns"],
                                    "outboundTag": "dns-via-v2rayn"}]},
             "outbounds": [
